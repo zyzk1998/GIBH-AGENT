@@ -3,9 +3,6 @@
 
 ### 第一部分：项目文档 (README.md)
 
-您可以将此内容保存为项目根目录下的 `README.md`。
-
-```markdown
 # GIBH-AGENT (Commercial Edition)
 **基于多模态大模型与微服务架构的单细胞生信分析智能体平台**
 
