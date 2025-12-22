@@ -16,7 +16,7 @@ GIBH-AGENT 是一个企业级生物信息学分析平台，旨在通过自然语
 *   **任务调度**: Celery + Redis (分布式异步任务队列，解决长耗时分析不阻塞)
 *   **推理引擎**: vLLM (部署 Qwen3-VL-8B/32B，OpenAI 兼容接口)
 *   **数据存储**: 本地文件系统 (热数据) + ChromaDB (向量知识库)
-![GIBH-AGENT 系统架构图](./architecture.png)
+![GIBH-AGENT 系统架构图](architecture)
 
 ## 🚀 核心功能
 1.  **多模态对话**: 支持图文多模态交互，可识别生信图表并生成解读。
