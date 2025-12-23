@@ -62,9 +62,7 @@ docker compose up -d --build
 *   **查看日志**: `docker compose logs -f`
 *   **重启后端**: `docker compose restart api-server worker`
 *   **停止服务**: `docker compose down`
-```
-
----
+  ---
 
 ### 第二部分：如何启动和使用
 
