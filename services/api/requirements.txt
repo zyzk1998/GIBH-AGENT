@@ -1,0 +1,27 @@
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+gunicorn>=23.0.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
+requests>=2.31.0
+
+# AI & LangChain
+langchain>=1.0.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-chroma>=0.1.4
+chromadb>=0.6.0
+
+# 异步任务 & 数据
+celery[redis]>=5.5.0
+redis>=6.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# 生信分析 (核心修复点)
+bioblend>=1.4.0
+scanpy[leiden]>=1.10.0  # 👈 取消注释，并强制安装 leiden 聚类算法
+matplotlib>=3.8.0
+pandas>=2.1.0
+scipy>=1.11.0

@@ -1,0 +1,17 @@
+data/models/
+data/uploads/
+data/redis/
+data/postgres/
+data/qdrant/
+data/logs/
+__pycache__/
+*.pyc
+.env1~data/models/
+data/uploads/
+data/redis/
+data/postgres/
+data/qdrant/
+data/logs/
+__pycache__/
+*.pyc
+.env

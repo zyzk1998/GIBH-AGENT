@@ -1,0 +1,2342 @@
+=== PROJECT STRUCTURE ===
+GIBH-AGENT/
+    benchmark.py
+    architecture_cn.py
+    docker-compose.yml
+    workflow.py
+    manage.sh
+    services/
+        worker/
+            src/
+        api/
+            Dockerfile
+            requirements.txt
+            src/
+                schemas.py
+                celery_app.py
+                skill_manager.py
+                config.py
+                scrna_analysis.py
+                main.py
+                agent.py
+                skills/
+                    scanpy_local.py
+        nginx/
+            html/
+                index.html
+            conf.d/
+                default.conf
+
+
+--- START OF FILE: benchmark.py ---
+import asyncio
+import httpx
+import time
+import json
+import random
+import string
+import pandas as pd
+import numpy as np
+from colorama import Fore, Style, init
+from datetime import datetime
+
+# 初始化颜色
+init(autoreset=True)
+
+# ================= ⚙️ 压测配置区域 (根据需求调整) =================
+# 1. 目标地址
+AGENT_URL = "http://localhost:8088/api/chat"
+JUDGE_URL = "http://localhost:8000/v1/chat/completions"
+JUDGE_MODEL = "qwen3-vl"
+
+# 2. 压力参数
+TEST_DURATION_SEC = 120   # ⏱️ 测试持续时间 (秒)，建议设为 300 (5分钟)
+CONCURRENCY = 30          # 🚀 并发数 (RTX 6000 建议 30-50，太高会增加延迟)
+SAMPLE_RATE = 0.1         # 🔍 评分抽样率 (10% 的回答会被 AI Doctor 检查)
+
+# 3. 题库 (基础题 + 随机噪声 = 无限题库)
+BASE_QUESTIONS = [
+    "解释单细胞测序中 Batch Effect 的原理及去除方法。",
+    "如何使用 Scanpy 进行细胞聚类？请给出代码示例。",
+    "TP53 基因在肿瘤发生中的作用是什么？",
+    "什么是 UMAP？它和 t-SNE 有什么区别？",
+    "线粒体基因含量过高说明了什么问题？",
+    "请解释 Seurat 流程中的 Normalization 步骤。",
+    "什么是高变基因 (HVG)？为什么要筛选它们？",
+    "细胞周期评分 (Cell Cycle Scoring) 是如何计算的？",
+    "如何通过标记基因 (Marker Genes) 注释细胞类型？",
+    "简述 scRNA-seq 数据分析的标准流程。"
+]
+# ===============================================================
+
+class StressStats:
+    def __init__(self):
+        self.total_requests = 0
+        self.success_count = 0
+        self.error_count = 0
+        self.latencies = []     # 总耗时
+        self.ttfts = []         # 首字延迟
+        self.scores = []        # 质量评分
+        self.start_time = 0
+        self.is_running = True
+
+stats = StressStats()
+
+def generate_random_question():
+    """生成带随机噪声的问题，防止缓存作弊"""
+    base_q = random.choice(BASE_QUESTIONS)
+    # 添加随机后缀，强制 LLM 重新计算 Attention
+    salt = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    return f"{base_q} (Ref: {salt})"
+
+async def ai_doctor_grade(client, question, answer):
+    """AI 医生抽检评分"""
+    prompt = f"""
+    你是一位生信专家。请对以下回答打分（0-10分）。
+    问题: {question}
+    回答: {answer}
+    
+    只返回一个 JSON: {{"score": 8.5, "reason": "..."}}
+    """
+    try:
+        resp = await client.post(JUDGE_URL, json={
+            "model": JUDGE_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 256
+        }, timeout=30)
+        res_json = json.loads(resp.json()['choices'][0]['message']['content'].replace("```json", "").replace("```", ""))
+        return res_json.get('score', 0)
+    except:
+        return 0
+
+async def worker(client, sem):
+    """模拟一个不断提问的用户"""
+    while stats.is_running:
+        async with sem:
+            question = generate_random_question()
+            start = time.perf_counter()
+            ttft = 0
+            first_chunk = False
+            full_response = ""
+            
+            try:
+                # 发起流式请求
+                async with client.stream("POST", AGENT_URL, json={"message": question, "history": []}, timeout=60) as response:
+                    if response.status_code != 200:
+                        stats.error_count += 1
+                        print(f"{Fore.RED}x", end="", flush=True)
+                        continue
+
+                    async for chunk in response.aiter_text():
+                        if not first_chunk:
+                            ttft = (time.perf_counter() - start) * 1000
+                            first_chunk = True
+                        if chunk:
+                            full_response += chunk
+                
+                # 请求完成
+                total_time = (time.perf_counter() - start) * 1000
+                stats.success_count += 1
+                stats.latencies.append(total_time)
+                stats.ttfts.append(ttft)
+                
+                # 🎲 随机抽检评分
+                if random.random() < SAMPLE_RATE:
+                    score = await ai_doctor_grade(client, question, full_response)
+                    if score > 0:
+                        stats.scores.append(score)
+                        print(f"{Fore.MAGENTA}★", end="", flush=True) # 评分标记
+                    else:
+                        print(f"{Fore.GREEN}.", end="", flush=True)
+                else:
+                    print(f"{Fore.GREEN}.", end="", flush=True) # 成功标记
+
+            except Exception as e:
+                stats.error_count += 1
+                print(f"{Fore.RED}!", end="", flush=True)
+
+async def monitor(duration):
+    """监控倒计时"""
+    start = time.time()
+    while time.time() - start < duration:
+        await asyncio.sleep(1)
+        elapsed = time.time() - start
+        rps = stats.success_count / elapsed if elapsed > 0 else 0
+        print(f"\r[{elapsed:.0f}s/{duration}s] RPS: {rps:.2f} | Err: {stats.error_count} | Avg Latency: {np.mean(stats.latencies) if stats.latencies else 0:.0f}ms", end="")
+    
+    stats.is_running = False
+
+async def run_stress_test():
+    print(f"{Fore.CYAN}🚀 GIBH-AGENT 持续压力测试 (Sustained Pressure Test)")
+    print(f"硬件环境: RTX 6000 | 并发数: {CONCURRENCY} | 持续时间: {TEST_DURATION_SEC}s")
+    print(f"策略: 随机噪声绕过缓存 + AI Doctor 抽检 ({int(SAMPLE_RATE*100)}%)")
+    print("-" * 60)
+    print("图例: .成功  x失败  !异常  ★抽检评分")
+    print("-" * 60)
+
+    stats.start_time = time.perf_counter()
+    
+    # 限制连接池
+    limits = httpx.Limits(max_keepalive_connections=CONCURRENCY, max_connections=CONCURRENCY)
+    async with httpx.AsyncClient(limits=limits, timeout=120.0) as client:
+        sem = asyncio.Semaphore(CONCURRENCY)
+        
+        # 启动监控协程
+        monitor_task = asyncio.create_task(monitor(TEST_DURATION_SEC))
+        
+        # 启动并发 Worker
+        workers = [asyncio.create_task(worker(client, sem)) for _ in range(CONCURRENCY)]
+        
+        # 等待时间结束
+        await monitor_task
+        
+        # 等待所有 Worker 收尾
+        print(f"\n{Fore.YELLOW}⏳ 时间到，正在等待剩余请求完成...")
+        await asyncio.gather(*workers, return_exceptions=True)
+
+    print_report()
+
+def print_report():
+    total_time = time.perf_counter() - stats.start_time
+    
+    print("\n\n" + "=" * 60)
+    print(f"{Fore.CYAN}📊 压力测试最终报告 (Pressure Report)")
+    print("=" * 60)
+    print(f"⏱️  实测时长:      {total_time:.2f} s")
+    print(f"📦 总请求数:      {stats.success_count + stats.error_count}")
+    print(f"✅ 成功请求:      {Fore.GREEN}{stats.success_count}")
+    print(f"❌ 失败请求:      {Fore.RED}{stats.error_count}")
+    print(f"🚀 平均 RPS:      {Fore.YELLOW}{stats.success_count / total_time:.2f} req/s")
+    
+    if stats.latencies:
+        print("-" * 60)
+        print(f"⚡ 首字延迟 (TTFT):")
+        print(f"   Avg: {np.mean(stats.ttfts):.2f} ms")
+        print(f"   P99: {np.percentile(stats.ttfts, 99):.2f} ms (99%的用户在此时间内看到第一个字)")
+        
+        print(f"🐢 完整响应耗时:")
+        print(f"   Avg: {np.mean(stats.latencies):.2f} ms")
+        print(f"   P99: {np.percentile(stats.latencies, 99):.2f} ms")
+    
+    if stats.scores:
+        print("-" * 60)
+        print(f"👨‍⚕️ AI Doctor 质量抽检 ({len(stats.scores)} samples):")
+        avg_score = np.mean(stats.scores)
+        score_color = Fore.GREEN if avg_score > 8 else Fore.YELLOW
+        print(f"   平均分: {score_color}{avg_score:.2f} / 10")
+        print(f"   最低分: {min(stats.scores)}")
+    
+    print("=" * 60)
+
+if __name__ == "__main__":
+    asyncio.run(run_stress_test())
+
+--- END OF FILE: benchmark.py ---
+
+--- START OF FILE: architecture_cn.py ---
+from diagrams import Diagram, Cluster, Edge
+from diagrams.programming.framework import FastAPI
+from diagrams.onprem.network import Nginx
+from diagrams.onprem.inmemory import Redis
+from diagrams.onprem.queue import Celery
+from diagrams.onprem.compute import Server
+from diagrams.onprem.client import User
+# ✅ 修复点：使用通用存储图标
+from diagrams.generic.storage import Storage
+
+# ================= 全局配置 =================
+# 设置中文字体 (WenQuanYi Zen Hei)
+graph_attr = {
+    "fontsize": "16",
+    "fontname": "WenQuanYi Zen Hei",
+    "bgcolor": "white",
+    "splines": "ortho", 
+    "nodesep": "0.6",
+    "ranksep": "0.8",
+    "pad": "0.5"
+}
+
+node_attr = {
+    "fontname": "WenQuanYi Zen Hei",
+    "fontsize": "14"
+}
+
+edge_attr = {
+    "fontname": "WenQuanYi Zen Hei",
+    "fontsize": "12"
+}
+
+with Diagram("GIBH-AGENT 系统架构图 (V1.0)", show=False, direction="TB", 
+             graph_attr=graph_attr, node_attr=node_attr, edge_attr=edge_attr):
+    
+    user = User("用户终端\n(Web/Browser)")
+
+    # === 宿主机容器环境 ===
+    with Cluster("Docker 容器化环境 (Ubuntu Host)"):
+        
+        # 1. 接入层
+        with Cluster("接入层 (Ingress)"):
+            gateway = Nginx("流量网关\n(Nginx :8088)")
+        
+        # 2. 业务应用层
+        with Cluster("业务应用层 (Application)"):
+            api = FastAPI("主控服务\n(API Server)")
+            
+            with Cluster("异步任务调度"):
+                queue = Redis("消息队列\n(Redis Broker)")
+                worker = Celery("生信分析引擎\n(Async Worker)")
+        
+        # 3. 智能推理层
+        with Cluster("AI 推理层 (Intelligence)"):
+            vllm = Server("大模型服务\n(vLLM Engine)")
+            
+        # 4. 数据存储层
+        with Cluster("数据持久化 (Persistence)"):
+            models = Storage("本地模型权重\n(Qwen3-VL)")
+            uploads = Storage("用户数据/结果\n(Shared Volume)")
+
+    # === 硬件底座 ===
+    gpu = Server("算力底座")
+
+    # ================= 连线逻辑 (带中文说明) =================
+
+    # 1. 访问链路
+    user >> Edge(label="HTTP请求") >> gateway
+    gateway >> Edge(label="反向代理") >> api
+    gateway >> Edge(style="dotted", label="静态资源映射") >> uploads
+
+    # 2. 业务链路
+    api >> Edge(label="1. 实时对话") >> vllm
+    api >> Edge(label="2. 提交任务") >> queue >> Edge(label="消费") >> worker
+    
+    # 3. 分析链路
+    worker >> Edge(label="视觉理解") >> vllm
+    worker >> Edge(label="读写数据") >> uploads
+
+    # 4. 硬件支撑
+    vllm >> Edge(label="加载权重", style="dashed") >> models
+    vllm >> Edge(label="CUDA 加速", color="firebrick", penwidth="2.0") >> gpu
+
+--- END OF FILE: architecture_cn.py ---
+
+--- START OF FILE: docker-compose.yml ---
+version: '3.9'
+
+services:
+  # =========================================
+  # 1. Nginx 网关
+  # =========================================
+  nginx:
+    image: nginx:alpine
+    container_name: gibh_gateway
+    restart: always
+    ports:
+      - "8088:80"
+    volumes:
+      - ./services/nginx/conf.d:/etc/nginx/conf.d
+      - ./services/nginx/html:/usr/share/nginx/html
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - api-server
+
+  # =========================================
+  # 2. API 服务
+  # =========================================
+  api-server:
+    build: 
+      context: ./services/api
+      dockerfile: Dockerfile
+    image: gibh-api:latest
+    container_name: gibh_api
+    restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VLLM_URL=http://inference-engine:8000/v1
+      - UPLOAD_DIR=/app/uploads
+      - LLM_MODEL=qwen3-vl
+    volumes:
+      - ./services/api/src:/app/src
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - redis
+      - inference-engine
+
+  # =========================================
+  # 3. Worker 服务
+  # =========================================
+  worker:
+    image: gibh-api:latest
+    container_name: gibh_worker
+    restart: always
+    command: celery -A src.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - VLLM_URL=http://inference-engine:8000/v1
+      - LLM_MODEL=qwen3-vl
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./services/api/src:/app/src
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - redis
+      - api-server
+
+  # =========================================
+  # 4. Redis
+  # =========================================
+  redis:
+    image: redis:7-alpine
+    container_name: gibh_redis
+    restart: always
+    volumes:
+      - ./data/redis:/data
+
+  # =========================================
+  # 5. 推理引擎 (vLLM - latest)
+  # =========================================
+  inference-engine:
+    # 🔴 使用你刚刚拉取成功的版本
+    image: vllm/vllm-openai:latest
+    container_name: gibh_inference
+    runtime: nvidia
+    restart: always
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - VLLM_TRUST_REMOTE_CODE=True
+      - VLLM_USE_V1=1
+    volumes:
+      - ./data/models/Qwen3-VL-8B-Instruct:/model
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    command: >
+      --model /model
+      --served-model-name qwen3-vl
+      --gpu-memory-utilization 0.9
+      --max-model-len 32768
+      --enforce-eager
+      --trust-remote-code
+      --disable-log-stats
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+
+--- END OF FILE: docker-compose.yml ---
+
+--- START OF FILE: workflow.py ---
+# 需要安装: pip install diagrams
+from diagrams import Diagram, Cluster, Edge
+from diagrams.onprem.compute import Server
+from diagrams.onprem.network import Nginx
+from diagrams.onprem.inmemory import Redis
+from diagrams.onprem.queue import Celery
+from diagrams.programming.framework import FastAPI
+from diagrams.custom import Custom
+
+# 甚至可以用自定义图片做图标 (比如 vLLM)
+with Diagram("GIBH-AGENT Architecture", show=False, direction="TB"):
+    user = Server("User")
+    
+    with Cluster("Docker Host"):
+        ingress = Nginx("Gateway :8088")
+        
+        with Cluster("Application Layer"):
+            api = FastAPI("API Server")
+            worker = Celery("Async Worker")
+            redis = Redis("Broker")
+            
+        with Cluster("Inference Layer"):
+            # 这里可以用 Custom 加载 vLLM 的 logo，或者用通用图标
+            vllm = Server("vLLM Engine")
+            
+    gpu = Server("RTX 6000 Blackwell")
+
+    # 逻辑连线
+    user >> Edge(label="HTTP") >> ingress
+    ingress >> api
+    api >> Edge(label="Task") >> redis >> worker
+    api >> Edge(label="Chat") >> vllm
+    worker >> Edge(label="Analysis") >> vllm
+    vllm >> Edge(label="CUDA 12.8") >> gpu
+
+--- END OF FILE: workflow.py ---
+
+--- START OF FILE: manage.sh ---
+#!/bin/bash
+
+# ====================================================
+# GIBH-AGENT 运维管理脚本 (DevOps Tool)
+# ====================================================
+
+# 定义颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# 检查是否在项目根目录
+if [ ! -f "docker-compose.yml" ]; then
+    echo -e "${RED}❌ 错误：请在包含 docker-compose.yml 的项目根目录下运行此脚本！${NC}"
+    exit 1
+fi
+
+# 打印头部
+print_header() {
+    clear
+    echo -e "${BLUE}================================================${NC}"
+    echo -e "${CYAN}   🧬 GIBH-AGENT 智能体管理控制台 (RTX 6000)   ${NC}"
+    echo -e "${BLUE}================================================${NC}"
+}
+
+# 核心函数
+start_all() {
+    echo -e "${GREEN}🚀 正在构建并启动所有服务...${NC}"
+    sudo docker compose up -d --build
+    echo -e "${GREEN}✅ 所有服务已启动！${NC}"
+}
+
+stop_all() {
+    echo -e "${YELLOW}🛑 正在停止所有服务...${NC}"
+    sudo docker compose down
+    echo -e "${GREEN}✅ 服务已停止。${NC}"
+}
+
+restart_backend() {
+    echo -e "${YELLOW}🔄 正在重启业务层 (API + Worker + Nginx)...${NC}"
+    echo -e "${CYAN}ℹ️  提示：vLLM (推理引擎) 不会重启，无需重新加载模型。${NC}"
+    sudo docker compose restart api-server worker nginx
+    echo -e "${GREEN}✅ 业务代码已更新并重启。${NC}"
+}
+
+restart_vllm() {
+    echo -e "${RED}⚠️  警告：重启 vLLM 需要重新加载 16GB 模型，耗时较长。${NC}"
+    read -p "确认重启? (y/n): " confirm
+    if [[ $confirm == "y" ]]; then
+        sudo docker compose restart inference-engine
+        echo -e "${GREEN}✅ vLLM 已重启，请查看日志等待模型加载。${NC}"
+        view_logs_vllm
+    fi
+}
+
+view_logs_vllm() {
+    echo -e "${CYAN}📜 正在打开 vLLM 推理引擎日志 (按 Ctrl+C 退出)...${NC}"
+    sudo docker compose logs -f inference-engine
+}
+
+view_logs_api() {
+    echo -e "${CYAN}📜 正在打开 API & Worker 联合日志 (按 Ctrl+C 退出)...${NC}"
+    sudo docker compose logs -f api-server worker
+}
+
+check_status() {
+    echo -e "${BLUE}📊 容器运行状态：${NC}"
+    sudo docker compose ps
+    echo ""
+    echo -e "${BLUE}🎮 显卡状态 (nvidia-smi)：${NC}"
+    nvidia-smi
+    read -p "按回车键返回菜单..."
+}
+
+# 主循环
+while true; do
+    print_header
+    echo -e "1. ${GREEN}🚀 一键启动 (Build & Up)${NC}  - 初次运行或修改配置后用"
+    echo -e "2. ${YELLOW}🛑 停止所有服务 (Down)${NC}    - 彻底关闭"
+    echo -e "3. ${CYAN}🔄 热重启后端代码${NC}         - 修改 Python/HTML 代码后用 (快!)"
+    echo -e "4. ${RED}🔥 重启推理引擎 (vLLM)${NC}    - 显卡报错或模型卡死时用"
+    echo -e "------------------------------------------------"
+    echo -e "5. ${BLUE}📜 查看 vLLM 日志${NC}           - 看模型加载进度/显存报错"
+    echo -e "6. ${BLUE}📜 查看 业务代码 日志${NC}       - 看 API 报错/任务执行情况"
+    echo -e "7. ${BLUE}📊 查看系统状态${NC}             - Docker 状态 + 显卡负载"
+    echo -e "------------------------------------------------"
+    echo -e "0. 🚪 退出脚本"
+    echo -e "================================================"
+    read -p "请输入选项数字 [0-7]: " choice
+
+    case $choice in
+        1) start_all; read -p "按回车继续..." ;;
+        2) stop_all; read -p "按回车继续..." ;;
+        3) restart_backend; read -p "按回车继续..." ;;
+        4) restart_vllm; read -p "按回车继续..." ;;
+        5) view_logs_vllm ;;
+        6) view_logs_api ;;
+        7) check_status ;;
+        0) echo "👋 Bye!"; exit 0 ;;
+        *) echo -e "${RED}无效选项，请重试。${NC}"; sleep 1 ;;
+    esac
+done
+
+--- END OF FILE: manage.sh ---
+
+--- START OF FILE: services/api/Dockerfile ---
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 安装系统级依赖 (编译生信库需要)
+RUN apt-get update && apt-get install -y \
+    build-essential gcc libhdf5-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# 默认启动命令 (会被 docker-compose 覆盖)
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+--- END OF FILE: services/api/Dockerfile ---
+
+--- START OF FILE: services/api/requirements.txt ---
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+gunicorn>=23.0.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
+requests>=2.31.0
+
+# AI & LangChain
+langchain>=1.0.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-chroma>=0.1.4
+chromadb>=0.6.0
+
+# 异步任务 & 数据
+celery[redis]>=5.5.0
+redis>=6.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# 生信分析 (核心修复点)
+bioblend>=1.4.0
+scanpy[leiden]>=1.10.0  # 👈 取消注释，并强制安装 leiden 聚类算法
+matplotlib>=3.8.0
+pandas>=2.1.0
+scipy>=1.11.0
+
+--- END OF FILE: services/api/requirements.txt ---
+
+--- START OF FILE: services/api/src/schemas.py ---
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+
+class FileInfo(BaseModel):
+    id: str
+    name: str
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[Dict[str, str]] = []
+    # 对应前端的 selectedTool
+    selected_tool: Optional[Dict[str, Any]] = None
+    # 对应前端的 toolParams
+    tool_params: Optional[Dict[str, Any]] = None
+    # 对应前端的 workflowData
+    workflow_data: Optional[Dict[str, Any]] = None
+    # 对应前端的 uploadedFiles
+    uploaded_files: List[FileInfo] = []
+    # 对应前端的 useHistoryFiles
+    use_history_files: bool = False
+
+--- END OF FILE: services/api/src/schemas.py ---
+
+--- START OF FILE: services/api/src/celery_app.py ---
+from celery import Celery
+from .config import settings
+from .skill_manager import SkillManager 
+import os
+
+celery_app = Celery(
+    "gibh_worker",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL
+)
+
+skill_mgr = SkillManager()
+
+@celery_app.task(bind=True)
+def run_bioinformatics_task(self, workflow_data: dict, files: list):
+    """
+    统一任务入口
+    """
+    print(f"🚀 [Worker] 收到任务，文件列表: {[f.get('name') for f in files]}")
+    
+    # 🛑 强制走本地分析逻辑 (移除 Galaxy 分支，防止假成功)
+    return _run_local_skill(self, workflow_data, files)
+
+def _run_local_skill(task_instance, workflow_data, files):
+    """执行本地 Python 插件"""
+    
+    if not files:
+        return {"status": "failed", "error": "❌ 错误：未接收到文件信息。"}
+    
+    # === 📂 智能路径处理 (关键修复) ===
+    # 默认取第一个文件
+    target_file_name = files[0]['name']
+    
+    # 检查是否为 10x Genomics 格式 (通常包含 matrix.mtx)
+    is_10x = False
+    for f in files:
+        if 'matrix.mtx' in f['name']:
+            is_10x = True
+            break
+    
+    if is_10x:
+        # 如果是 10x 数据，Scanpy 需要读取的是"目录"，而不是文件
+        # Docker 里的上传目录是 settings.UPLOAD_DIR
+        data_input_path = settings.UPLOAD_DIR
+        print(f"📂 检测到 10x 格式，设置输入路径为目录: {data_input_path}")
+    else:
+        # 如果是 h5ad，直接读取文件
+        data_input_path = os.path.join(settings.UPLOAD_DIR, target_file_name)
+        print(f"📂 检测到单文件格式，设置输入路径为: {data_input_path}")
+
+    # 再次校验物理路径
+    if not os.path.exists(data_input_path):
+        return {"status": "failed", "error": f"❌ 错误：找不到路径 {data_input_path}"}
+    
+    # 提取参数
+    merged_params = {}
+    for step in workflow_data['steps']:
+        merged_params.update(step.get('params', {}))
+    
+    # 获取插件
+    skill = skill_mgr.get_skill("scanpy_local")
+    if not skill:
+        # 尝试重新加载
+        skill_mgr._load_skills()
+        skill = skill_mgr.get_skill("scanpy_local")
+        if not skill:
+            return {"status": "failed", "error": "❌ 严重错误：无法加载 scanpy_local 插件，请检查 skills 目录。"}
+    
+    # === 执行 ===
+    try:
+        print("▶️ 开始执行 Scanpy Pipeline...")
+        task_instance.update_state(state='PROGRESS', meta={'steps': [{"name": "正在初始化 Scanpy...", "status": "running"}]})
+        
+        # 执行分析
+        result = skill.execute(data_input_path, merged_params, settings.UPLOAD_DIR)
+        
+        print(f"✅ 执行结束，状态: {result.get('status')}")
+        return result
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"status": "failed", "error": f"运行异常: {str(e)}"}
+
+--- END OF FILE: services/api/src/celery_app.py ---
+
+--- START OF FILE: services/api/src/skill_manager.py ---
+import os
+import importlib.util
+import glob
+import sys
+
+class SkillManager:
+    def __init__(self, skills_dir="skills"):
+        # 🛡️ 健壮的路径查找逻辑
+        # 1. 尝试相对于当前文件的路径
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        target_dir = os.path.join(base_dir, skills_dir)
+        
+        # 2. 如果找不到，尝试相对于工作目录 (Docker 容器内通常是 /app/src/skills)
+        if not os.path.exists(target_dir):
+            target_dir = os.path.join(os.getcwd(), "src", skills_dir)
+        
+        # 3. 再次兜底
+        if not os.path.exists(target_dir):
+             target_dir = "/app/src/skills"
+
+        self.skills_dir = target_dir
+        self.skills = {}
+        print(f"🔍 SkillManager initialized. Scanning dir: {self.skills_dir}")
+        self._load_skills()
+
+    def _load_skills(self):
+        """动态加载 skills 目录下的所有 .py 插件"""
+        if not os.path.exists(self.skills_dir):
+            print(f"⚠️ Skills dir not found: {self.skills_dir}")
+            return
+
+        # 将 skills 目录加入 sys.path，防止 import 报错
+        if self.skills_dir not in sys.path:
+            sys.path.append(self.skills_dir)
+
+        for file_path in glob.glob(os.path.join(self.skills_dir, "*.py")):
+            module_name = os.path.basename(file_path)[:-3]
+            if module_name == "__init__":
+                continue
+            
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                
+                if hasattr(module, "META"):
+                    self.skills[module.META['id']] = module
+                    print(f"✅ Loaded Skill: {module.META['name']} ({module.META['id']})")
+            except Exception as e:
+                print(f"❌ Failed to load skill {module_name}: {e}")
+
+    def get_skill(self, skill_id):
+        return self.skills.get(skill_id)
+
+    def match_skill(self, query):
+        # 简单的关键词匹配
+        for skill in self.skills.values():
+            if skill.META['id'] in query or skill.META['name'] in query:
+                return skill
+        return None
+
+--- END OF FILE: services/api/src/skill_manager.py ---
+
+--- START OF FILE: services/api/src/config.py ---
+import os
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    # 基础路径
+    UPLOAD_DIR: str = "/app/uploads"
+    
+    # 服务连接
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    VLLM_URL: str = os.getenv("VLLM_URL", "http://inference-engine:8000/v1")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen3-vl")
+    
+    # Galaxy 配置 (可选)
+    GALAXY_URL: str = os.getenv("GALAXY_URL", "http://192.168.8.111:8080")
+    GALAXY_KEY: str = os.getenv("GALAXY_API_KEY", "your_key")
+
+settings = Settings()
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+--- END OF FILE: services/api/src/config.py ---
+
+--- START OF FILE: services/api/src/scrna_analysis.py ---
+import scanpy as sc
+import os
+import matplotlib
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+import pandas as pd
+import time
+import warnings
+import io
+import base64
+
+warnings.filterwarnings("ignore")
+
+sc.settings.verbosity = 3
+sc.settings.set_figure_params(dpi=300, facecolor='white', frameon=True, vector_friendly=True)
+
+class LocalSingleCellPipeline:
+    def __init__(self, output_dir="/app/uploads/results"):
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def _save_plot(self, name_prefix):
+        timestamp = int(time.time())
+        filename = f"{name_prefix}_{timestamp}.png"
+        save_path = os.path.join(self.output_dir, filename)
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        plt.close()
+        return f"/uploads/results/{filename}"
+
+    def run_pipeline(self, data_input, steps_config=None):
+        report = {
+            "status": "running",
+            "steps_details": [],
+            "final_plot": None,
+            "qc_metrics": {},
+            "diagnosis": "",
+            "error": None
+        }
+        adata = None
+
+        try:
+            print(f"📂 Loading data from: {data_input}")
+            
+            # === 🛠️ 核心修复：更健壮的数据读取逻辑 ===
+            if os.path.isdir(data_input):
+                # 尝试读取 10x 目录
+                try:
+                    # 优先尝试标准读取 (会自动找 .gz)
+                    adata = sc.read_10x_mtx(data_input, var_names='gene_symbols', cache=False)
+                except FileNotFoundError:
+                    print("⚠️ read_10x_mtx failed, trying manual mtx load...")
+                    # 如果失败 (比如文件没压缩)，尝试手动读取
+                    # 假设文件名是标准的 matrix.mtx, features.tsv, barcodes.tsv
+                    mtx_path = os.path.join(data_input, "matrix.mtx")
+                    if not os.path.exists(mtx_path): mtx_path = os.path.join(data_input, "matrix.mtx.gz")
+                    
+                    adata = sc.read_mtx(mtx_path).T  # 读入后转置 (Cells x Genes)
+                    
+                    # 读取 features (genes)
+                    genes_path = os.path.join(data_input, "features.tsv")
+                    if not os.path.exists(genes_path): genes_path = os.path.join(data_input, "genes.tsv")
+                    genes = pd.read_csv(genes_path, header=None, sep='\t')
+                    adata.var_names = genes[1].values # 假设第二列是基因名
+                    adata.var['gene_ids'] = genes[0].values
+                    
+                    # 读取 barcodes
+                    barcodes_path = os.path.join(data_input, "barcodes.tsv")
+                    barcodes = pd.read_csv(barcodes_path, header=None, sep='\t')
+                    adata.obs_names = barcodes[0].values
+                
+                adata.var_names_make_unique()
+                
+            elif data_input.endswith('.h5ad'):
+                adata = sc.read_h5ad(data_input)
+            else:
+                adata = sc.read(data_input)
+            # ===========================================
+            
+            report["qc_metrics"]["raw_cells"] = adata.n_obs
+            report["qc_metrics"]["raw_genes"] = adata.n_vars
+            
+            if not steps_config: steps_config = []
+
+            for step in steps_config:
+                tool_id = step['tool_id']
+                params = step.get('params', {})
+                step_result = {"name": tool_id, "status": "success", "plot": None, "details": ""}
+
+                print(f"▶️ Running step: {tool_id}")
+
+                if tool_id == "local_qc":
+                    adata.var['mt'] = adata.var_names.str.startswith(('MT-', 'mt-'))
+                    sc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)
+                    sc.pl.violin(adata, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True, show=False)
+                    step_result["plot"] = self._save_plot("qc_violin")
+                    
+                    min_genes = int(params.get('min_genes', 200))
+                    max_mt = float(params.get('max_mt', 20))
+                    sc.pp.filter_cells(adata, min_genes=min_genes)
+                    adata = adata[adata.obs.pct_counts_mt < max_mt, :]
+                    
+                    report["qc_metrics"]["filtered_cells"] = adata.n_obs
+                    step_result["summary"] = f"剩余 {adata.n_obs} 细胞"
+
+                elif tool_id == "local_normalize":
+                    sc.pp.normalize_total(adata, target_sum=1e4)
+                    sc.pp.log1p(adata)
+                    step_result["summary"] = "LogNormalize 完成"
+
+                elif tool_id == "local_hvg":
+                    sc.pp.highly_variable_genes(adata, n_top_genes=2000)
+                    sc.pl.highly_variable_genes(adata, show=False)
+                    step_result["plot"] = self._save_plot("hvg")
+                    adata = adata[:, adata.var.highly_variable]
+                    step_result["summary"] = "筛选 2000 高变基因"
+
+                elif tool_id == "local_scale":
+                    sc.pp.scale(adata, max_value=10)
+                    step_result["summary"] = "数据缩放完成"
+
+                elif tool_id == "local_pca":
+                    sc.tl.pca(adata, svd_solver='arpack')
+                    sc.pl.pca_variance_ratio(adata, log=True, show=False)
+                    step_result["plot"] = self._save_plot("pca_variance")
+                    step_result["summary"] = "PCA 降维完成"
+
+                elif tool_id == "local_neighbors":
+                    sc.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
+                    step_result["summary"] = "邻接图构建完成"
+
+                elif tool_id == "local_cluster":
+                    resolution = float(params.get('resolution', 0.5))
+                    sc.tl.leiden(adata, resolution=resolution)
+                    n_clusters = len(adata.obs['leiden'].unique())
+                    step_result["summary"] = f"Leiden 聚类 (Res={resolution}): {n_clusters} 簇"
+
+                elif tool_id == "local_umap":
+                    sc.tl.umap(adata)
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    sc.pl.umap(adata, color=['leiden'], ax=ax, show=False, title="UMAP", legend_loc='on data', frameon=False)
+                    umap_path = self._save_plot("final_umap")
+                    step_result["plot"] = umap_path
+                    report["final_plot"] = umap_path
+                    step_result["summary"] = "UMAP 生成完毕"
+
+                elif tool_id == "local_tsne":
+                    if adata.n_obs < 5000: 
+                        sc.tl.tsne(adata)
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        sc.pl.tsne(adata, color=['leiden'], ax=ax, show=False, title="t-SNE", frameon=False)
+                        step_result["plot"] = self._save_plot("final_tsne")
+                        step_result["summary"] = "t-SNE 生成完毕"
+                    else:
+                        step_result["summary"] = "细胞数过多，跳过 t-SNE"
+
+                elif tool_id == "local_markers":
+                    sc.tl.rank_genes_groups(adata, 'leiden', method='t-test')
+                    result = adata.uns['rank_genes_groups']
+                    groups = result['names'].dtype.names
+                    markers_df = pd.DataFrame(
+                        {group + '_' + key: result[key][group]
+                        for group in groups for key in ['names', 'pvals']}
+                    ).head(5)
+                    step_result["details"] = markers_df.to_html(classes="table table-sm", index=False)
+                    step_result["summary"] = "Marker 基因鉴定完成"
+
+                report["steps_details"].append(step_result)
+
+            report["diagnosis"] = f"""
+            ### ✅ 分析完成 (10 Steps)
+            - **原始细胞**: {report['qc_metrics'].get('raw_cells', 0)}
+            - **过滤后**: {report['qc_metrics'].get('filtered_cells', 0)}
+            - **聚类结果**: 成功识别出细胞亚群。
+            - **可视化**: 已生成 UMAP 和 t-SNE (如适用) 图表。
+            """
+            
+            report["status"] = "success"
+            return report
+
+        except Exception as e:
+            print(f"❌ Pipeline Error: {e}")
+            import traceback
+            traceback.print_exc()
+            report["status"] = "failed"
+            report["error"] = str(e)
+            return report
+
+--- END OF FILE: services/api/src/scrna_analysis.py ---
+
+--- START OF FILE: services/api/src/main.py ---
+import os
+import shutil
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
+from celery.result import AsyncResult
+
+from .config import settings
+from .schemas import ChatRequest
+from .agent import BioBlendAgent
+from .celery_app import celery_app, run_bioinformatics_task
+
+app = FastAPI(title="GIBH Commercial API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+agent = BioBlendAgent()
+
+@app.post("/api/chat")
+async def chat_endpoint(req: ChatRequest):
+    """
+    处理用户对话或工作流执行请求
+    """
+    # 🟢 分支 A: 用户点击了“运行工作流”
+    if req.workflow_data:
+        task = run_bioinformatics_task.delay(
+            workflow_data=req.workflow_data,
+            files=[f.dict() for f in req.uploaded_files]
+        )
+        return {
+            "type": "workflow_started",
+            "run_id": task.id,
+            "reply": f"🚀 工作流已启动！任务ID: {task.id}\n正在后台计算，请稍候...",
+            "thought": "任务已提交至 Celery 分布式队列。"
+        }
+
+    # 🔵 分支 B: 智能对话 / 意图识别
+    response = await agent.process_query(
+        query=req.message,
+        history=req.history,
+        uploaded_files=req.uploaded_files
+    )
+    
+    # 判断返回类型
+    if hasattr(response, "__aiter__"):
+        return StreamingResponse(response, media_type="text/plain")
+    
+    return response
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    try:
+        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+        file_path = os.path.join(settings.UPLOAD_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        return {"status": "success", "file_name": file.filename, "file_id": file.filename}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/workflow/status/{run_id}")
+async def get_status(run_id: str):
+    task_result = AsyncResult(run_id, app=celery_app)
+    
+    response = {
+        "status": "running",
+        "completed": False,
+        "steps_status": [], 
+        "error": None
+    }
+
+    if task_result.state == 'PENDING':
+        response["status"] = "running"
+        
+    elif task_result.state == 'SUCCESS':
+        response["status"] = "success"
+        response["completed"] = True
+        
+        result_data = task_result.result 
+        if result_data:
+            # 🔥🔥🔥 核心修复：将 Worker 的结果（包含图片路径）透传给前端
+            response["report_data"] = result_data
+            
+            # 兼容进度条显示
+            if "steps_details" in result_data:
+                response["steps_status"] = result_data["steps_details"]
+            elif "steps" in result_data:
+                response["steps_status"] = result_data["steps"]
+                
+    elif task_result.state == 'FAILURE':
+        response["status"] = "failed"
+        response["completed"] = True
+        response["error"] = str(task_result.result)
+        
+    elif task_result.state == 'PROGRESS':
+        info = task_result.info
+        if isinstance(info, dict):
+            response["steps_status"] = info.get("steps", [])
+    
+    return response
+
+
+--- END OF FILE: services/api/src/main.py ---
+
+--- START OF FILE: services/api/src/agent.py ---
+import json
+import asyncio
+from typing import AsyncGenerator, Union
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
+from .config import settings
+
+class BioBlendAgent:
+    def __init__(self):
+        # 连接到 vLLM (RTX 6000)
+        self.llm = ChatOpenAI(
+            model=settings.LLM_MODEL,
+            base_url=settings.VLLM_URL,
+            api_key="EMPTY",
+            temperature=0.1, 
+            max_tokens=4096,
+            streaming=True
+        )
+
+    async def process_query(self, query: str, history: list, uploaded_files: list = None) -> Union[dict, AsyncGenerator]:
+        """
+        智能处理入口
+        """
+        query_text = query.lower().strip()
+        
+        # 1. 显式意图识别
+        if any(k in query_text for k in ["规划", "流程", "workflow", "pipeline"]):
+            return self._generate_workflow_config(query, uploaded_files)
+
+        # 2. 隐式意图识别 (Context Awareness)
+        if uploaded_files and (not query_text or query_text == "发送了文件" or len(query_text) < 5):
+            if history and len(history) > 0:
+                last_msg = history[-1]
+                if last_msg.get('role') == 'assistant' and "未上传数据" in last_msg.get('content', ''):
+                    return self._generate_workflow_config("规划流程", uploaded_files)
+
+        # 3. 默认：流式对话 (带深度思考)
+        return self._stream_chat(query, uploaded_files)
+
+    def _get_filename(self, f):
+        if isinstance(f, dict):
+            return f.get('name', 'unknown')
+        return getattr(f, 'name', 'unknown')
+
+    def _generate_workflow_config(self, query, uploaded_files=None):
+        """
+        生成前端可渲染的工作流配置卡片
+        """
+        if not uploaded_files:
+            reply_text = "已为您规划标准分析流程。⚠️ **检测到您尚未上传数据**，请先点击回形针上传 .h5ad 或 .mtx 文件，然后再点击“执行”。"
+        else:
+            names = [self._get_filename(f) for f in uploaded_files]
+            file_names = ", ".join(names)
+            reply_text = f"收到文件：**{file_names}**。\n已为您自动匹配 **Standard Scanpy Pipeline (10 Steps)**，涵盖从质控到多维可视化的全流程。请确认参数："
+
+        return {
+            "type": "workflow_config",
+            "reply": reply_text,
+            "workflow_name": "Standard Scanpy Pipeline",
+            "steps": [
+                {"name": "1. Quality Control", "tool_id": "local_qc", "desc": "Filter cells & genes", "params": [{"name": "min_genes", "label": "Min Genes", "value": "200", "type": "text"}, {"name": "max_mt", "label": "Max MT%", "value": "20", "type": "text"}]},
+                {"name": "2. Normalization", "tool_id": "local_normalize", "desc": "Log1p Normalize", "params": []},
+                {"name": "3. Find Variable Genes", "tool_id": "local_hvg", "desc": "Select top 2000 genes", "params": []},
+                {"name": "4. Scale Data", "tool_id": "local_scale", "desc": "Scale to unit variance", "params": []},
+                {"name": "5. PCA", "tool_id": "local_pca", "desc": "Dimensionality Reduction", "params": []},
+                {"name": "6. Compute Neighbors", "tool_id": "local_neighbors", "desc": "Build neighborhood graph", "params": []},
+                {"name": "7. Clustering", "tool_id": "local_cluster", "desc": "Leiden Clustering", "params": [{"name": "resolution", "label": "Resolution", "value": "0.5", "type": "text"}]},
+                {"name": "8. UMAP Visualization", "tool_id": "local_umap", "desc": "Non-linear embedding", "params": []},
+                {"name": "9. t-SNE Visualization", "tool_id": "local_tsne", "desc": "t-SNE Visualization", "params": []},
+                {"name": "10. Find Markers", "tool_id": "local_markers", "desc": "Identify cluster markers", "params": []}
+            ],
+            "thought": "识别到用户需要规划分析流程，已加载 Scanpy 完整标准模板。"
+        }
+
+    async def _stream_chat(self, query: str, uploaded_files=None) -> AsyncGenerator[str, None]:
+        """
+        流式对话生成器 (注入思维链指令)
+        """
+        # 1. 构建上下文
+        file_context = ""
+        if uploaded_files:
+            names = [self._get_filename(f) for f in uploaded_files]
+            file_context = f"\n[User Context - Uploaded Files]: {', '.join(names)}"
+
+        # 2. 定义系统人设 (System Prompt) - 🔥 核心修改：强制输出 <think> 标签
+        system_template = """你是一个专业的生物信息学专家助手 GIBH-Agent。
+
+请按照以下步骤回答问题：
+1. **深度思考 (Thinking Process)**：首先，在 `<think>` 和 `</think>` 标签内，详细规划你的回答逻辑、分析用户意图、检查是否有潜在的坑（如文件格式、参数设置）。这部分内容不要直接展示给用户看。
+2. **正式回答 (Response)**：思考结束后，在标签外给出最终的、结构清晰的回答。
+
+请遵循：
+- 准确性优先，不要编造。
+- 使用 Markdown 格式。
+- 拒绝无关问题。
+
+{file_context}
+"""
+        system_message = SystemMessagePromptTemplate.from_template(system_template)
+        human_message = HumanMessagePromptTemplate.from_template("{query}")
+        
+        chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
+        
+        chain = chat_prompt | self.llm
+        
+        # 3. 执行流式生成
+        async for chunk in chain.astream({"query": query, "file_context": file_context}):
+            content = ""
+            if hasattr(chunk, 'content') and chunk.content:
+                content = chunk.content
+            elif isinstance(chunk, str):
+                content = chunk
+            
+            if content:
+                yield content
+                # 平滑阻尼 (RTX 6000 专用)
+                await asyncio.sleep(0.01)
+
+--- END OF FILE: services/api/src/agent.py ---
+
+--- START OF FILE: services/api/src/skills/scanpy_local.py ---
+import sys
+import os
+
+# 修复导入路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+if src_dir not in sys.path:
+    sys.path.append(src_dir)
+
+try:
+    from scrna_analysis import LocalSingleCellPipeline
+except ImportError:
+    # Docker 环境下的备用导入
+    from src.scrna_analysis import LocalSingleCellPipeline
+
+META = {
+    "id": "scanpy_local",
+    "name": "Local Scanpy Engine (Full)",
+    "description": "Execute standard 10-step scRNA-seq pipeline",
+    "template": {
+        "name": "Standard Scanpy Pipeline",
+        "steps": [
+            {"name": "Quality Control", "tool_id": "local_qc", "params": {"min_genes": "200", "max_mt": "20"}},
+            {"name": "Normalization", "tool_id": "local_normalize", "params": {}},
+            {"name": "Find Variable Genes", "tool_id": "local_hvg", "params": {}},
+            {"name": "Scale Data", "tool_id": "local_scale", "params": {}},
+            {"name": "PCA", "tool_id": "local_pca", "params": {}},
+            {"name": "Compute Neighbors", "tool_id": "local_neighbors", "params": {}},
+            {"name": "Clustering", "tool_id": "local_cluster", "params": {"resolution": "0.5"}},
+            {"name": "UMAP Visualization", "tool_id": "local_umap", "params": {}},
+            {"name": "t-SNE Visualization", "tool_id": "local_tsne", "params": {}},
+            {"name": "Find Markers", "tool_id": "local_markers", "params": {}}
+        ]
+    }
+}
+
+def execute(file_path, params, output_dir):
+    print(f"🚀 [Scanpy Skill] Starting analysis on: {file_path}")
+    
+    # 确保结果目录存在
+    results_dir = os.path.join(output_dir, "results")
+    os.makedirs(results_dir, exist_ok=True)
+    
+    pipeline = LocalSingleCellPipeline(output_dir=results_dir)
+    
+    # 使用 META 中的模板作为基准
+    steps_config = META['template']['steps']
+    
+    # 注入用户参数
+    for step in steps_config:
+        step_params = step.get('params', {})
+        for key in step_params.keys():
+            if key in params:
+                step['params'][key] = params[key]
+
+    return pipeline.run_pipeline(file_path, steps_config)
+
+--- END OF FILE: services/api/src/skills/scanpy_local.py ---
+
+--- START OF FILE: services/nginx/html/index.html ---
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GIBH Qwen Agent</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <!-- 引入 Highlight.js 用于代码高亮 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <style>
+        /* ================= 全局变量 ================= */
+        :root {
+            --bg-color: #ffffff;
+            --chat-width: 800px;
+            --primary-color: #4d6bfe;
+            --text-color: #1f1f1f;
+            --thought-bg: #fcfcfc;
+            --thought-border: #f0f0f0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            margin: 0;
+            overflow: hidden;
+            color: var(--text-color);
+        }
+
+        /* ================= 导航栏 ================= */
+        .navbar {
+            background: rgba(255,255,255,0.9);
+            backdrop-filter: blur(10px);
+            position: absolute; top: 0; width: 100%; z-index: 10;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.03);
+        }
+        .brand-logo { font-weight: 600; font-size: 1.1rem; color: #333; display: flex; align-items: center; gap: 8px; }
+
+        /* ================= 聊天区域 ================= */
+        .chat-scroll-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 80px 20px 200px 20px;
+            scroll-behavior: smooth;
+        }
+        .chat-content { max-width: var(--chat-width); margin: 0 auto; }
+
+        /* 消息气泡 */
+        .message-row { display: flex; margin-bottom: 24px; animation: fadeIn 0.2s ease; }
+        .message-row.user { justify-content: flex-end; }
+        
+        .avatar {
+            width: 32px; height: 32px; border-radius: 6px; margin-right: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 18px; flex-shrink: 0; margin-top: 2px;
+        }
+        .avatar.ai { background: #eef2ff; color: var(--primary-color); }
+        
+        .message-container { max-width: 100%; flex: 1; min-width: 0; }
+        .message-row.user .message-container { flex: initial; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; }
+
+        .bubble { font-size: 15px; line-height: 1.6; color: #374151; position: relative; }
+        .message-row.user .bubble {
+            background-color: #f4f4f4;
+            color: #000;
+            padding: 8px 14px;
+            border-radius: 18px;
+            border-bottom-right-radius: 4px;
+            text-align: left;
+            display: inline-block;
+        }
+        .bubble p:last-child { margin-bottom: 0; }
+        
+        /* 📋 代码块增强样式 */
+        .bubble pre {
+            background: #0d1117;
+            border-radius: 6px;
+            margin: 10px 0;
+            position: relative;
+            padding-top: 30px; /* 留出头部空间 */
+        }
+        .bubble pre code {
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            padding: 12px;
+            display: block;
+            overflow-x: auto;
+            color: #c9d1d9;
+        }
+        /* 代码块头部 */
+        .code-header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 30px;
+            background: #161b22;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 10px;
+            font-size: 12px;
+            color: #8b949e;
+            border-bottom: 1px solid #30363d;
+        }
+        .copy-btn {
+            background: transparent;
+            border: none;
+            color: #8b949e;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: color 0.2s;
+        }
+        .copy-btn:hover { color: #fff; }
+
+        /* 🔥 深度思考折叠卡片样式 */
+        .thought-process {
+            margin-bottom: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background-color: #f9fafb;
+            overflow: hidden;
+        }
+        .thought-summary {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #6b7280;
+            display: flex;
+            align-items: center;
+            background: #f3f4f6;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .thought-summary:hover { background: #e5e7eb; }
+        .thought-summary i { margin-right: 6px; color: #8b5cf6; } 
+        .thought-content {
+            padding: 12px;
+            font-size: 13px;
+            color: #4b5563;
+            line-height: 1.6;
+            border-top: 1px solid #e5e7eb;
+            display: none; 
+            white-space: pre-wrap;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            background: #ffffff;
+        }
+        .thought-content.open { display: block; animation: fadeIn 0.3s; }
+        
+        /* ⏱️ 计时器与底部栏 */
+        .message-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 11px;
+            color: #9ca3af;
+            padding-left: 2px;
+            padding-right: 2px;
+        }
+        .generation-timer {
+            font-family: monospace;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .generation-timer i { font-size: 10px; }
+
+        /* 交互组件 */
+        .user-actions { display: flex; flex-direction: row; gap: 15px; opacity: 0; transition: opacity 0.2s; }
+        .message-row.user:hover .user-actions { opacity: 1; }
+        .action-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #9ca3af; cursor: pointer; transition: color 0.2s; white-space: nowrap; }
+        .action-item:hover { color: #4b5563; }
+
+        /* 功能卡片样式 */
+        .params-form { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .form-label { font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
+        .form-text { font-size: 12px; color: #999; }
+        .form-control, .form-select { font-size: 14px; border-radius: 6px; }
+        .btn-run { width: 100%; margin-top: 15px; font-weight: 600; }
+        
+        .accordion-button { padding: 10px 15px; font-size: 14px; font-weight: 600; }
+        .accordion-button:not(.collapsed) { background-color: #eef2ff; color: #4d6bfe; }
+        .accordion-body { padding: 15px; background: #fcfcfc; }
+
+        .workflow-monitor { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .step-item { display: flex; align-items: center; padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+        .step-item:last-child { border-bottom: none; }
+        .step-icon { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 12px; font-size: 12px; flex-shrink: 0; }
+        .step-icon.pending { background: #f3f4f6; color: #9ca3af; }
+        .step-icon.running { background: #eef2ff; color: #4d6bfe; animation: pulse 1.5s infinite; }
+        .step-icon.success { background: #d1fae5; color: #059669; }
+        .step-icon.failed { background: #fee2e2; color: #dc2626; }
+        .step-name { font-size: 14px; font-weight: 500; color: #374151; flex: 1; }
+        .step-status-text { font-size: 12px; color: #6b7280; }
+
+        .data-selector-container { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; overflow: hidden; margin-top: 10px; }
+        .data-selector-header { padding: 12px 15px; background: #f9fafb; border-bottom: 1px solid #eee; font-weight: 600; color: #333; font-size: 14px; }
+        .data-selector-list { max-height: 300px; overflow-y: auto; padding: 5px 0; }
+        .dataset-item { display: flex; align-items: center; padding: 10px 15px; cursor: pointer; transition: background 0.2s; border-bottom: 1px solid #f9f9f9; }
+        .dataset-item:last-child { border-bottom: none; }
+        .dataset-item:hover { background: #f0f7ff; }
+        .dataset-item.selected { background: #eef2ff; border-left: 3px solid var(--primary-color); }
+        .dataset-item input { margin-right: 12px; transform: scale(1.2); cursor: pointer; }
+        .dataset-info { display: flex; flex-direction: column; pointer-events: none; } 
+        .dataset-name { font-size: 13px; font-weight: 500; color: #333; }
+        .dataset-meta { font-size: 11px; color: #999; margin-top: 2px; }
+        .data-selector-footer { padding: 10px 15px; border-top: 1px solid #eee; background: #fff; display: flex; justify-content: flex-end; }
+
+        .analysis-report { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .report-title { font-size: 16px; font-weight: 700; color: #333; }
+        .report-section { margin-top: 20px; }
+        .report-section h6 { font-weight: 600; color: #555; margin-bottom: 10px; }
+        .llm-diagnosis { background: #f0f7ff; border-left: 4px solid #4d6bfe; padding: 15px; border-radius: 4px; font-size: 14px; line-height: 1.6; color: #333; }
+
+        /* 🔍 图片灯箱样式 */
+        .lightbox {
+            display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.9); justify-content: center; align-items: center;
+        }
+        .lightbox img { max-width: 90%; max-height: 90%; border-radius: 4px; box-shadow: 0 0 20px rgba(255,255,255,0.1); }
+        .lightbox-close { position: absolute; top: 20px; right: 30px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
+
+        /* 打印样式 */
+        @media print {
+            @page { margin: 0; size: auto; }
+            body * { visibility: hidden; }
+            body { margin: 1.6cm; background: white; }
+            .analysis-report, .analysis-report * { visibility: visible; }
+            .analysis-report { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; border: none; box-shadow: none; padding-top: 60px; }
+            .report-header button { display: none !important; }
+            body::before { content: "GIBH Qwen 生信智能助手"; visibility: visible; position: fixed; top: 0; left: 0; right: 0; text-align: center; font-size: 16pt; font-weight: bold; color: #2c3e50; border-bottom: 2px solid #4d6bfe; padding-bottom: 10px; background-color: white; z-index: 9999; }
+            body::after { content: "Generated by GIBH Qwen Agent | 仅供科研参考"; visibility: visible; position: fixed; bottom: 0; left: 0; right: 0; text-align: center; font-size: 9pt; color: #999; background-color: white; padding-top: 5px; border-top: 1px solid #eee; }
+            .accordion-collapse { display: block !important; height: auto !important; visibility: visible !important; }
+            .accordion-button { pointer-events: none; background: none !important; color: black !important; padding-left: 0; font-weight: bold; border: none; }
+            .accordion-button::after { display: none !important; }
+            .accordion-item { border: none; border-bottom: 1px solid #eee; }
+            img { max-width: 90% !important; display: block; margin: 10px auto; page-break-inside: avoid; }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+
+        /* ================= 输入框区域 ================= */
+        .input-wrapper { position: fixed; bottom: 30px; left: 0; width: 100%; display: flex; justify-content: center; padding: 0 20px; z-index: 100; pointer-events: none; }
+        .chat-input-panel { pointer-events: auto; width: 100%; max-width: var(--chat-width); background: #fff; border: 1px solid #e6e6e6; border-radius: 20px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); padding: 10px 14px; display: flex; flex-direction: column; transition: box-shadow 0.2s; }
+        .chat-input-panel:focus-within { box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1); border-color: #d0d0d0; }
+        .input-area { width: 100%; margin-bottom: 4px; display: flex; align-items: center; }
+        .main-input { width: 100%; border: none; outline: none; font-size: 16px; line-height: 1.5; resize: none; color: #333; background: transparent; font-family: inherit; height: 24px; min-height: 24px; max-height: 200px; overflow-y: hidden; padding: 0; margin: 0; box-sizing: border-box; }
+        .main-input::placeholder { color: #aaa; }
+        .main-input:disabled { background: transparent; cursor: not-allowed; color: #999; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+        .toolbar-left { display: flex; gap: 10px; }
+        .toolbar-right { display: flex; align-items: center; gap: 10px; }
+        .icon-btn { width: 34px; height: 34px; border-radius: 8px; border: none; background: transparent; color: #666; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s, color 0.2s; font-size: 18px; }
+        .icon-btn:hover { background: #f5f5f5; color: #333; }
+        .icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+        .send-btn { width: 34px; height: 34px; border-radius: 50%; background: #e5e5e5; color: #fff; border: none; display: flex; align-items: center; justify-content: center; cursor: not-allowed; transition: all 0.2s; margin-left: 8px; }
+        .send-btn.active { background: #333; cursor: pointer; }
+        .send-btn i { font-size: 16px; }
+        
+        /* ⏹️ 停止按钮样式 */
+        .stop-btn {
+            display: none; /* 默认隐藏 */
+            background-color: #fee2e2; color: #dc2626; border: 1px solid #fecaca;
+            border-radius: 20px; padding: 4px 12px; font-size: 12px;
+            cursor: pointer; align-items: center; gap: 4px;
+            transition: all 0.2s;
+        }
+        .stop-btn:hover { background-color: #fecaca; }
+        .stop-btn.show { display: flex; }
+
+        .file-chips-area { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+        .file-chip { background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: #555; display: flex; align-items: center; gap: 6px; }
+        #dropOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); z-index: 999; display: none; flex-direction: column; justify-content: center; align-items: center; color: var(--primary-color); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <div id="dropOverlay">
+        <i class="bi bi-cloud-upload" style="font-size: 48px; margin-bottom: 10px;"></i>
+        <h4>释放文件以上传</h4>
+    </div>
+
+    <!-- 🔍 图片灯箱 -->
+    <div id="lightbox" class="lightbox" onclick="closeLightbox()">
+        <span class="lightbox-close">&times;</span>
+        <img id="lightbox-img" src="">
+    </div>
+
+    <nav class="navbar">
+        <div class="container d-flex justify-content-center">
+            <div class="brand-logo"><i class="bi bi-stars" style="color: var(--primary-color);"></i> GIBH Qwen Agent</div>
+        </div>
+    </nav>
+
+    <div class="chat-scroll-area" id="chatBox">
+        <div class="chat-content" id="chatContent">
+            <!-- 开场白 -->
+            <div class="message-row ai">
+                <div class="avatar ai"><i class="bi bi-robot"></i></div>
+                <div class="message-container">
+                    <div class="bubble">
+                        <p>你好！我是您的 <b>GIBH Qwen 生信智能助手</b>。</p>
+                        <p>我可以协助您进行工具查询、数据上传及 Seurat 流程规划。同时，我也具备<b>视觉分析能力</b>，您可以发送：</p>
+                        <ul>
+                            <li>📸 <b>报错截图</b>：获取故障诊断与修复建议。</li>
+                            <li>📊 <b>生信图表</b>：解读 UMAP、热图等数据的生物学意义。</li>
+                        </ul>
+                        <p style="margin-top: 10px; font-size: 12px; color: #888;">
+                            <i class="bi bi-info-circle"></i> 试着直接拖入一张图片，或者问我："帮我规划一个单细胞流程"。
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-wrapper">
+        <!-- ⏹️ 停止生成按钮 (悬浮在输入框上方) -->
+        <div id="stopBtnContainer" style="position: absolute; top: -40px; width: 100%; display: flex; justify-content: center; pointer-events: none;">
+            <button id="stopBtn" class="stop-btn" style="pointer-events: auto;" onclick="stopGeneration()">
+                <i class="bi bi-stop-circle-fill"></i> 停止生成
+            </button>
+        </div>
+
+        <div class="chat-input-panel">
+            <div id="filePreviewArea" class="file-chips-area"></div>
+            <div class="input-area">
+                <textarea id="userInput" class="main-input" placeholder="尽管问..." rows="1" oninput="autoResize(this); checkInput();" onkeydown="handleEnter(event)"></textarea>
+            </div>
+            <div class="toolbar">
+                <div class="toolbar-left"></div>
+                <div class="toolbar-right">
+                    <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(this.files)" multiple>
+                    <button id="uploadBtn" class="icon-btn" onclick="document.getElementById('fileInput').click()" title="上传文件">
+                        <i class="bi bi-paperclip"></i>
+                    </button>
+                    <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 配置 marked 使用 highlight.js
+        marked.setOptions({
+            highlight: function(code, lang) {
+                const language = highlight.getLanguage(lang) ? lang : 'plaintext';
+                return highlight.highlight(code, { language }).value;
+            },
+            langPrefix: 'hljs language-'
+        });
+
+        // 自定义渲染器：为代码块添加头部（语言标签 + 复制按钮）
+        const renderer = new marked.Renderer();
+        renderer.code = function(code, language) {
+            const lang = language || 'Text';
+            // 转义代码内容以防止 XSS
+            const escapedCode = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+            
+            return `
+            <div class="code-block-wrapper">
+                <div class="code-header">
+                    <span>${lang}</span>
+                    <button class="copy-btn" onclick="copyCode(this)">
+                        <i class="bi bi-clipboard"></i> 复制
+                    </button>
+                </div>
+                <pre><code class="hljs language-${lang}">${escapedCode}</code></pre>
+                <!-- 隐藏的原始代码用于复制 -->
+                <textarea style="display:none;">${escapedCode}</textarea>
+            </div>`;
+        };
+        marked.use({ renderer });
+
+        const chatContent = document.getElementById('chatContent');
+        const chatScrollArea = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const filePreviewArea = document.getElementById('filePreviewArea');
+        const dropOverlay = document.getElementById('dropOverlay');
+        const stopBtn = document.getElementById('stopBtn');
+
+        let chatHistory = []; 
+        let uploadedFiles = []; 
+        let isProcessing = false; 
+        let abortController = null; // 用于中断请求
+
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+            if (textarea.scrollHeight > 200) textarea.style.overflowY = "auto";
+            else textarea.style.overflowY = "hidden";
+        }
+        window.onload = () => autoResize(userInput);
+
+        function checkInput() {
+            if (isProcessing) { sendBtn.classList.remove('active'); return; }
+            if (userInput.value.trim() !== '' || uploadedFiles.length > 0) sendBtn.classList.add('active');
+            else sendBtn.classList.remove('active');
+        }
+
+        function handleEnter(e) { 
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!isProcessing) sendMessage();
+            }
+        }
+
+        function toggleLoadingState(isLoading) {
+            isProcessing = isLoading;
+            userInput.disabled = isLoading;
+            uploadBtn.disabled = isLoading;
+            if (isLoading) {
+                sendBtn.disabled = true; sendBtn.classList.remove('active'); userInput.style.cursor = 'wait';
+                stopBtn.classList.add('show'); // 显示停止按钮
+            } else {
+                sendBtn.disabled = false; userInput.style.cursor = 'text'; userInput.focus(); checkInput();
+                stopBtn.classList.remove('show'); // 隐藏停止按钮
+            }
+        }
+
+        // ⏹️ 停止生成逻辑
+        function stopGeneration() {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+                toggleLoadingState(false);
+                // 在最后一条消息追加 [已停止]
+                const lastBubble = chatContent.lastElementChild.querySelector('.bubble');
+                if (lastBubble) lastBubble.innerHTML += ' <span style="color:#dc2626; font-size:12px;">(已停止)</span>';
+            }
+        }
+
+        // 📋 复制代码逻辑
+        function copyCode(btn) {
+            const wrapper = btn.closest('.code-block-wrapper');
+            const code = wrapper.querySelector('code').innerText;
+            navigator.clipboard.writeText(code).then(() => {
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = '<i class="bi bi-check2"></i> 已复制';
+                setTimeout(() => btn.innerHTML = originalHtml, 2000);
+            });
+        }
+
+        // 🔍 灯箱逻辑
+        function openLightbox(src) {
+            const lightbox = document.getElementById('lightbox');
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            lightbox.style.display = 'flex';
+        }
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
+        }
+
+        // 拖拽上传逻辑
+        window.addEventListener('dragenter', (e) => { if(!isProcessing) { e.preventDefault(); dropOverlay.style.display = 'flex'; } });
+        window.addEventListener('dragleave', (e) => { e.preventDefault(); if (e.clientX === 0 && e.clientY === 0) dropOverlay.style.display = 'none'; });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => { e.preventDefault(); dropOverlay.style.display = 'none'; if (!isProcessing && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files); });
+        window.addEventListener('paste', (e) => { if (!isProcessing && e.clipboardData.files.length > 0) { e.preventDefault(); handleFileSelect(e.clipboardData.files); } });
+
+        async function handleFileSelect(files) {
+            if (files.length === 0) return;
+            toggleLoadingState(true);
+            for (let i = 0; i < files.length; i++) await uploadSingleFile(files[i]);
+            document.getElementById('fileInput').value = ''; 
+            toggleLoadingState(false);
+        }
+
+        async function uploadSingleFile(file) {
+            const tempId = 'temp-' + Date.now();
+            addFileTag(file.name, true, tempId);
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                removeFileTag(tempId);
+                if (data.status === 'success') {
+                    uploadedFiles.push({ id: data.file_id, name: data.file_name });
+                    renderFileTags();
+                } else alert(`上传失败: ${data.message}`);
+            } catch (e) { removeFileTag(tempId); alert(`网络错误: ${e}`); }
+        }
+
+        function renderFileTags() {
+            filePreviewArea.innerHTML = '';
+            uploadedFiles.forEach((f, index) => {
+                const div = document.createElement('div');
+                div.className = 'file-chip';
+                div.innerHTML = `<i class="bi bi-file-earmark-text"></i><span>${f.name}</span><i class="bi bi-x" style="cursor:pointer" onclick="removeFile(${index})"></i>`;
+                filePreviewArea.appendChild(div);
+            });
+        }
+        function addFileTag(name, isLoading, tempId) {
+            const div = document.createElement('div');
+            div.className = 'file-chip'; div.id = tempId;
+            div.innerHTML = `<i class="bi bi-${isLoading ? 'hourglass-split' : 'file-earmark-text'}"></i><span>${name} ${isLoading ? '(上传中...)' : ''}</span>`;
+            filePreviewArea.appendChild(div);
+        }
+        function removeFileTag(id) { const el = document.getElementById(id); if (el) el.remove(); }
+        function removeFile(index) { if(!isProcessing) { uploadedFiles.splice(index, 1); renderFileTags(); checkInput(); } }
+
+        async function sendMessage(selectedTool = null, originalQuery = null, toolParams = null, workflowData = null, useHistoryFiles = false) {
+            if (isProcessing) return;
+            let text = userInput.value.trim();
+            if (originalQuery) text = originalQuery;
+            
+            if (!text && uploadedFiles.length === 0 && !workflowData && !useHistoryFiles) return;
+
+            if (!selectedTool && !workflowData && !useHistoryFiles) {
+                appendMessage('user', text || `[发送了 ${uploadedFiles.length} 个文件]`);
+                userInput.value = ''; userInput.style.height = '24px'; 
+                checkInput();
+            }
+
+            toggleLoadingState(true);
+            
+            // ⏱️ 启动计时器
+            const startTime = Date.now();
+            const aiMessageDiv = appendMessage('ai', '<span class="spinner-border spinner-border-sm text-primary" role="status"></span><span style="margin-left:8px; color:#666;">思考中...</span>', null, null, true);
+            const aiContentDiv = aiMessageDiv; 
+            
+            // 找到底部栏，准备插入计时器
+            const footerDiv = aiMessageDiv.closest('.message-row').querySelector('.message-footer');
+            const timerSpan = document.createElement('span');
+            timerSpan.className = 'generation-timer';
+            timerSpan.innerHTML = '<i class="bi bi-stopwatch"></i> 0.0s';
+            footerDiv.prepend(timerSpan); // 插入到最左边
+
+            const timerInterval = setInterval(() => {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                timerSpan.innerHTML = `<i class="bi bi-stopwatch"></i> ${elapsed}s`;
+            }, 100);
+
+            // 初始化 AbortController
+            abortController = new AbortController();
+
+            const payload = { 
+                message: text, 
+                history: chatHistory, 
+                selected_tool: selectedTool, 
+                uploaded_files: uploadedFiles,
+                tool_params: toolParams,
+                workflow_data: workflowData,
+                use_history_files: useHistoryFiles
+            };
+            
+            try {
+                const res = await fetch('/api/chat', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal // 绑定信号
+                });
+
+                if (!res.ok) throw new Error(await res.text());
+
+                const contentType = res.headers.get("content-type");
+
+                // === 分支 A: JSON ===
+                if (contentType && contentType.includes("application/json")) {
+                    const data = await res.json();
+                    clearInterval(timerInterval); // 停止计时
+                    
+                    aiMessageDiv.closest('.message-row').remove();
+
+                    // 传递 duration 给渲染函数
+                    const finalDuration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+                    if (data.type === 'workflow_config') {
+                        appendMessage('ai', data.reply, data.thought, finalDuration);
+                        renderWorkflowForm(data);
+                    }
+                    else if (data.type === 'workflow_started') {
+                        appendMessage('ai', data.reply, data.thought, finalDuration);
+                        startWorkflowPolling(data.run_id);
+                    }
+                    else if (data.type === 'analysis_report') {
+                        renderAnalysisReport(data);
+                    }
+                    else {
+                        appendMessage('ai', marked.parse(data.reply), data.thought, finalDuration, true);
+                    }
+                    return;
+                }
+
+                // === 分支 B: 流式 ===
+                aiContentDiv.innerHTML = ''; 
+                
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = "";
+                
+                let thoughtBuffer = "";
+                let isThinking = false;
+                let hasThoughtBlock = false;
+                let finalAnswer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    fullText += chunk; 
+
+                    // <think> 解析逻辑
+                    if (chunk.includes('<think>')) {
+                        isThinking = true;
+                        hasThoughtBlock = true;
+                        if (!aiContentDiv.querySelector('.thought-process')) {
+                            aiContentDiv.innerHTML = `
+                                <div class="thought-process">
+                                    <div class="thought-summary" onclick="toggleThought(this)">
+                                        <i class="bi bi-stars"></i> 深度思考过程 (点击展开)
+                                    </div>
+                                    <div class="thought-content"></div>
+                                </div>
+                                <div class="final-answer"></div>
+                            `;
+                        }
+                    }
+
+                    if (chunk.includes('</think>')) {
+                        isThinking = false;
+                        const parts = chunk.split('</think>');
+                        thoughtBuffer += parts[0].replace('<think>', '');
+                        
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
+
+                        if (parts[1]) {
+                            finalAnswer += parts[1];
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                        continue; 
+                    }
+
+                    if (isThinking) {
+                        thoughtBuffer += chunk.replace('<think>', '');
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer; 
+                    } 
+                    else {
+                        if (!hasThoughtBlock) {
+                            finalAnswer += chunk;
+                            aiContentDiv.innerHTML = marked.parse(finalAnswer);
+                        } else {
+                            finalAnswer += chunk;
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                    }
+                    
+                    // 🔍 为图片添加点击放大事件
+                    const imgs = aiContentDiv.querySelectorAll('img');
+                    imgs.forEach(img => {
+                        img.style.cursor = 'zoom-in';
+                        img.onclick = () => openLightbox(img.src);
+                    });
+
+                    scrollToBottom();
+                }
+                
+                chatHistory.push({ user: text, ai: fullText });
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    // 用户手动停止，不做处理
+                } else {
+                    aiContentDiv.innerHTML = `<span style="color:red">请求失败: ${error.message}</span>`;
+                }
+            } finally { 
+                clearInterval(timerInterval); // 停止计时
+                toggleLoadingState(false); 
+                abortController = null;
+            }
+        }
+
+        // ... (其他渲染函数保持不变，如 renderAnalysisReport, renderWorkflowForm 等) ...
+        // 为了节省篇幅，这里省略了未修改的辅助函数，请确保保留原有的 renderAnalysisReport 等函数
+        // ⚠️ 注意：请确保 appendMessage 函数被正确更新（见下文）
+
+        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
+            
+            // 底部栏 (包含计时器和操作按钮)
+            let footerHtml = '';
+            if (role === 'ai') {
+                footerHtml = `
+                <div class="message-footer">
+                    ${duration ? `<span class="generation-timer"><i class="bi bi-stopwatch"></i> ${duration}s</span>` : ''}
+                    <div style="display:flex; gap:10px;">
+                        <i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)" title="复制回答"></i>
+                    </div>
+                </div>`;
+            }
+            
+            let userActionsHtml = '';
+            if (role === 'user') {
+                userActionsHtml = `
+                <div class="user-actions">
+                    <div class="action-item" onclick="editMessage(this)"><i class="bi bi-pencil"></i> 编辑</div>
+                    <div class="action-item" onclick="copyText(this)"><i class="bi bi-copy"></i> 复制</div>
+                </div>`;
+            }
+
+            const bubbleContent = isHtml ? content : marked.parse(content);
+            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container"><div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+            return row.querySelector('.bubble');
+        }
+
+        // ... (保留原有的 renderWorkflowForm, startWorkflowPolling, renderAnalysisReport 等函数) ...
+        // ⚠️ 请务必将之前完整的辅助函数粘贴回来，或者只替换上面的 sendMessage 和 appendMessage
+        
+        // 为了方便你直接复制，我把所有辅助函数再贴一遍：
+        
+        function renderAnalysisReport(data) {
+            const reportId = `report-${Date.now()}`;
+            const reportData = data.report_data;
+            const diagnosis = data.diagnosis;
+            
+            let html = `
+            <div class="analysis-report" id="${reportId}">
+                <div class="report-header">
+                    <span class="report-title"><i class="bi bi-file-earmark-medical"></i> 单细胞分析报告</span>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
+                        <i class="bi bi-printer"></i> 打印/保存PDF
+                    </button>
+                </div>
+                <div class="report-section"><h6>1. 执行流程详情</h6><div class="accordion" id="acc-${reportId}">`;
+            
+            reportData.steps_details.forEach((step, index) => {
+                const stepId = `step-${reportId}-${index}`;
+                const statusIcon = step.status === 'success' ? '✅' : '❌';
+                const plotHtml = step.plot ? `<div class="mt-2"><img src="${step.plot}" style="max-width:100%; border-radius:4px; cursor:zoom-in;" onclick="openLightbox(this.src)"></div>` : '';
+                html += `<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">${statusIcon} ${step.name} <span class="ms-auto text-muted small">${step.summary}</span></button></h2><div id="${stepId}" class="accordion-collapse collapse" data-bs-parent="#acc-${reportId}"><div class="accordion-body"><div class="small text-secondary mb-2">${step.details}</div>${plotHtml}</div></div></div>`;
+            });
+            
+            html += `</div></div><div class="report-section"><h6>2. AI 专家诊断与建议</h6><div class="llm-diagnosis">${marked.parse(diagnosis)}</div></div><div class="report-section"><h6>3. 最终可视化结果</h6>${reportData.final_plot ? `<img src="${reportData.final_plot}" style="width:100%; border-radius:8px; cursor:zoom-in;" onclick="openLightbox(this.src)">` : '无图表生成'}</div></div>`;
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function renderDataSelector(datasets) {
+            const selectorId = `ds-${Date.now()}`;
+            let html = `<div class="data-selector-container" id="${selectorId}"><div class="data-selector-header"><i class="bi bi-folder2-open"></i> 选择 Galaxy 历史数据</div><div class="data-selector-list">`;
+            datasets.forEach(d => {
+                html += `<div class="dataset-item" onclick="toggleCheckbox(this)"><input type="checkbox" class="form-check-input" value="${d.id}" data-name="${d.name}" onclick="event.stopPropagation(); toggleCheckbox(this.parentElement, true)"><div class="dataset-info"><span class="dataset-name">${d.hid}: ${d.name}</span><span class="dataset-meta">${d.ext} | ${d.size}</span></div></div>`;
+            });
+            html += `</div><div class="data-selector-footer"><button class="btn btn-primary btn-sm" onclick="submitDataSelection('${selectorId}')">确认使用 <i class="bi bi-check2"></i></button></div></div>`;
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function toggleCheckbox(row, fromCheckbox = false) {
+            const checkbox = row.querySelector('input[type="checkbox"]');
+            if (!fromCheckbox) checkbox.checked = !checkbox.checked;
+            if(checkbox.checked) row.classList.add('selected'); else row.classList.remove('selected');
+        }
+
+        function submitDataSelection(selectorId) {
+            const container = document.getElementById(selectorId);
+            const checkboxes = container.querySelectorAll('input:checked');
+            if (checkboxes.length === 0) { alert("请至少选择一个文件"); return; }
+            uploadedFiles = []; let selectedNames = [];
+            checkboxes.forEach(cb => { const name = cb.getAttribute('data-name'); uploadedFiles.push({ id: cb.value, name: name }); selectedNames.push(name); });
+            const btn = container.querySelector('button'); btn.disabled = true; btn.innerText = "已选择";
+            const userMsg = `我已选择以下文件：\n${selectedNames.join('\n')}\n\n请基于这些文件，继续规划 Seurat 单细胞分析工作流。`;
+            appendMessage('user', userMsg);
+            sendMessage(null, "已选择文件，请继续规划 Seurat 单细胞工作流", null, null, true);
+        }
+
+        function startWorkflowPolling(runId) {
+            const monitorId = `monitor-${runId}`;
+            const html = `<div class="workflow-monitor" id="${monitorId}"><h6>🚀 工作流执行进度</h6><div class="steps-container"></div></div>`;
+            appendMessage('ai', html, null, null, true);
+            const container = document.getElementById(monitorId).querySelector('.steps-container');
+            const poll = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/workflow/status/${runId}`);
+                    const data = await res.json();
+                    if (data.status === 'not_found') { clearInterval(poll); return; }
+                    let stepsHtml = '';
+                    data.steps_status.forEach((step, index) => {
+                        let iconClass = 'pending'; let iconContent = '<i class="bi bi-circle"></i>';
+                        if (step.status === 'running') { iconClass = 'running'; iconContent = '<i class="bi bi-arrow-repeat"></i>'; }
+                        else if (step.status === 'success') { iconClass = 'success'; iconContent = '<i class="bi bi-check-lg"></i>'; }
+                        else if (step.status === 'failed') { iconClass = 'failed'; iconContent = '<i class="bi bi-x-lg"></i>'; }
+                        stepsHtml += `<div class="step-item"><div class="step-icon ${iconClass}">${iconContent}</div><div class="step-name">${step.name || 'Step ' + (index + 1)}</div><div class="step-status-text">${step.status}</div></div>`;
+                    });
+                    container.innerHTML = stepsHtml;
+                    if (data.completed) {
+                        clearInterval(poll);
+                        if (data.status === 'success') {
+                            container.innerHTML += `<div class="alert alert-success mt-3 mb-0">🎉 工作流全部执行完成！正在加载报告...</div>`;
+                            const reportPayload = { diagnosis: "✅ **分析成功！**\n\n数据已完成全流程处理，下方展示了最终的 UMAP 降维可视化结果及关键质控指标。", report_data: data.report_data };
+                            setTimeout(() => { renderAnalysisReport(reportPayload); scrollToBottom(); }, 500);
+                        } else { container.innerHTML += `<div class="alert alert-danger mt-3 mb-0">❌ 执行出错: ${data.error}</div>`; }
+                    }
+                } catch (e) { console.error(e); }
+            }, 2000);
+        }
+
+        function renderWorkflowForm(data) {
+            const formId = `wf-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>📋 ${data.workflow_name}</h5><p class="text-muted">请确认或修改每一步的参数：</p><div class="accordion" id="acc-${formId}">`;
+            data.steps.forEach((step, index) => {
+                const stepId = `step-${index}`;
+                formHtml += `<div class="accordion-item"><h2 class="accordion-header d-flex align-items-center"><div class="form-check ms-3 me-2"><input class="form-check-input step-checkbox" type="checkbox" checked data-index="${index}"></div><button class="accordion-button ${index > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">${step.name}</button></h2><div id="${stepId}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#acc-${formId}"><div class="accordion-body"><p class="text-muted small">${step.desc}</p><input type="hidden" name="tool_id_${index}" value="${step.tool_id}"><input type="hidden" name="step_name_${index}" value="${step.name}">`;
+                step.params.forEach(p => {
+                    const inputName = `param_${index}_${p.name}`;
+                    formHtml += `<div class="mb-2"><label class="form-label small">${p.label}</label>`;
+                    if (p.type === 'select') {
+                        formHtml += `<select class="form-select form-select-sm" name="${inputName}">`;
+                        p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
+                        formHtml += `</select>`;
+                    } else if (p.type === 'boolean') {
+                        const checked = p.value === 'true' ? 'checked' : '';
+                        formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${inputName}" ${checked}></div>`;
+                    } else { formHtml += `<input type="text" class="form-control form-control-sm" name="${inputName}" value="${p.value || ''}">`; }
+                    formHtml += `</div>`;
+                });
+                formHtml += `</div></div></div>`;
+            });
+            formHtml += `</div><button class="btn btn-success btn-run mt-3" onclick="submitWorkflow('${formId}', ${data.steps.length})">🚀 执行工作流</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitWorkflow(formId, totalSteps) {
+            if (uploadedFiles.length === 0) { alert("⚠️ 请先上传单细胞数据文件 (.h5ad, .mtx 等) 再执行工作流！"); document.getElementById('fileInput').click(); return; }
+            const formContainer = document.getElementById(formId);
+            const stepsData = [];
+            const checkboxes = formContainer.querySelectorAll('.step-checkbox');
+            checkboxes.forEach((cb, i) => {
+                if (cb.checked) {
+                    const toolId = formContainer.querySelector(`input[name="tool_id_${i}"]`).value;
+                    const stepName = formContainer.querySelector(`input[name="step_name_${i}"]`).value;
+                    const params = {};
+                    const inputs = formContainer.querySelectorAll(`[name^="param_${i}_"]`);
+                    inputs.forEach(input => {
+                        const originalName = input.name.replace(`param_${i}_`, '');
+                        if (input.type === 'checkbox') params[originalName] = input.checked;
+                        else params[originalName] = input.value;
+                    });
+                    stepsData.push({ name: stepName, tool_id: toolId, params: params });
+                }
+            });
+            if (stepsData.length === 0) { alert("请至少选择一个步骤！"); return; }
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "工作流执行中...";
+            sendMessage(null, "Execute Workflow", null, { steps: stepsData });
+        }
+
+        function renderToolForm(data) {
+            const formId = `form-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>🛠️ ${data.tool_name} 参数配置</h5><hr>`;
+            data.params.forEach(p => {
+                formHtml += `<div class="mb-3"><label class="form-label">${p.label}</label>`;
+                if (p.type === 'select') {
+                    formHtml += `<select class="form-select" name="${p.name}">`;
+                    p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
+                    formHtml += `</select>`;
+                } else if (p.type === 'boolean') {
+                    const checked = p.value === 'true' ? 'checked' : '';
+                    formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${p.name}" ${checked}></div>`;
+                } else { formHtml += `<input type="text" class="form-control" name="${p.name}" value="${p.value || ''}">`; }
+                if (p.help) formHtml += `<div class="form-text">${p.help}</div>`;
+                formHtml += `</div>`;
+            });
+            const toolInfoStr = JSON.stringify({name: data.tool_name, id: data.tool_id}).replace(/"/g, '&quot;');
+            formHtml += `<button class="btn btn-primary btn-run" onclick="submitToolForm('${formId}', ${toolInfoStr})">🚀 确认并执行</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitToolForm(formId, toolInfo) {
+            const formContainer = document.getElementById(formId);
+            const inputs = formContainer.querySelectorAll('input, select');
+            const params = {};
+            inputs.forEach(input => { if (input.type === 'checkbox') params[input.name] = input.checked; else params[input.name] = input.value; });
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "已提交...";
+            sendMessage(toolInfo, `Run ${toolInfo.name} with params`, params);
+        }
+
+        function formatExecutionResult(text) {
+            text = text.trim();
+            let tableHtml = '<div class="props-panel">';
+            let hasData = false;
+            if (text.startsWith('{') && text.endsWith('}')) {
+                try {
+                    let jsonStr = text.replace(/'/g, '"').replace(/\bFalse\b/g, 'false').replace(/\bTrue\b/g, 'true').replace(/\bNone\b/g, 'null');
+                    const obj = JSON.parse(jsonStr);
+                    for (const [key, value] of Object.entries(obj)) {
+                        hasData = true;
+                        const displayValue = (typeof value === 'object' && value !== null) ? JSON.stringify(value) : value;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${key}</div><div class="prop-value">${displayValue}</div></div>`;
+                    }
+                } catch (e) { console.warn("Dict parse failed"); }
+            }
+            if (!hasData) {
+                const lines = text.split('\n');
+                lines.forEach(line => {
+                    const match = line.match(/^\s*([^:]+):\s*(.*)$/);
+                    if (match) {
+                        hasData = true;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${match[1].trim()}</div><div class="prop-value">${match[2].trim()}</div></div>`;
+                    }
+                });
+            }
+            tableHtml += '</div>';
+            return hasData ? `<h6>✅ 执行结果</h6>${tableHtml}` : `<h6>✅ 执行结果</h6><pre>${text}</pre>`;
+        }
+
+        function toggleCode(btn) {
+            const container = btn.nextElementSibling;
+            if (container.style.display === 'block') { container.style.display = 'none'; btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码'; }
+            else { container.style.display = 'block'; btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码'; }
+        }
+
+        function toggleThought(header) {
+            const content = header.nextElementSibling;
+            const icon = header.querySelector('.bi-chevron-down');
+            if (content.classList.contains('open')) {
+                content.classList.remove('open');
+                header.querySelector('i').className = 'bi bi-stars'; 
+            } else {
+                content.classList.add('open');
+                header.querySelector('i').className = 'bi bi-chevron-down'; 
+            }
+        }
+
+        function copyText(btn) {
+            let text = "";
+            const container = btn.closest('.message-container');
+            if (container) text = container.querySelector('.bubble').innerText;
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const icon = btn.querySelector('i');
+                    if(icon) { const originalClass = icon.className; icon.className = 'bi bi-check'; setTimeout(() => icon.className = originalClass, 2000); }
+                });
+            } else {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed"; textArea.style.left = "-9999px";
+                document.body.appendChild(textArea); textArea.focus(); textArea.select();
+                try { document.execCommand('copy'); } catch (err) {}
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function editMessage(btn) {
+            const container = btn.closest('.message-container');
+            const text = container.querySelector('.bubble').innerText;
+            userInput.value = text; userInput.focus(); autoResize(userInput); checkInput();
+        }
+
+        function selectTool(tool, query) { appendMessage('user', `我选择运行: <b>${tool.name}</b>`); sendMessage(tool, query); }
+        function scrollToBottom() { chatScrollArea.scrollTop = chatScrollArea.scrollHeight; }
+    </script>
+</body>
+</html>
+
+--- END OF FILE: services/nginx/html/index.html ---
+
+--- START OF FILE: services/nginx/conf.d/default.conf ---
+upstream backend_api {
+    server api-server:8000;
+}
+
+server {
+    listen 80;
+    server_name localhost;
+
+    # 1. 前端静态页面
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 2. API 接口转发
+    location /api/ {
+        proxy_pass http://backend_api;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        client_max_body_size 10G;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+
+        # ✅ 流式传输优化 (修正版)
+        proxy_http_version 1.1;      # 启用 HTTP/1.1 支持长连接
+        proxy_set_header Connection ""; # 清空 Connection 头，防止由 HTTP/1.0 关闭连接
+        proxy_buffering off;         # 关闭缓冲，让数据实时流出
+        proxy_cache off;             # 关闭缓存
+        tcp_nodelay on;              # 禁用 Nagle 算法
+    }
+
+    # 3. 静态资源服务 (图片)
+    location /uploads/ {
+        alias /app/uploads/;
+        autoindex on;
+        expires 1d;
+    }
+}
+
+--- END OF FILE: services/nginx/conf.d/default.conf ---
+

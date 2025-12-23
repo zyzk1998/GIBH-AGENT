@@ -1,0 +1,107 @@
+version: '3.9'
+
+services:
+  # =========================================
+  # 1. Nginx 网关
+  # =========================================
+  nginx:
+    image: nginx:alpine
+    container_name: gibh_gateway
+    restart: always
+    ports:
+      - "8088:80"
+    volumes:
+      - ./services/nginx/conf.d:/etc/nginx/conf.d
+      - ./services/nginx/html:/usr/share/nginx/html
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - api-server
+
+  # =========================================
+  # 2. API 服务
+  # =========================================
+  api-server:
+    build: 
+      context: ./services/api
+      dockerfile: Dockerfile
+    image: gibh-api:latest
+    container_name: gibh_api
+    restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - VLLM_URL=http://inference-engine:8000/v1
+      - UPLOAD_DIR=/app/uploads
+      - LLM_MODEL=qwen3-vl
+    volumes:
+      - ./services/api/src:/app/src
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - redis
+      - inference-engine
+
+  # =========================================
+  # 3. Worker 服务
+  # =========================================
+  worker:
+    image: gibh-api:latest
+    container_name: gibh_worker
+    restart: always
+    command: celery -A src.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - UPLOAD_DIR=/app/uploads
+      - VLLM_URL=http://inference-engine:8000/v1
+      - LLM_MODEL=qwen3-vl
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./services/api/src:/app/src
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - redis
+      - api-server
+
+  # =========================================
+  # 4. Redis
+  # =========================================
+  redis:
+    image: redis:7-alpine
+    container_name: gibh_redis
+    restart: always
+    volumes:
+      - ./data/redis:/data
+
+  # =========================================
+  # 5. 推理引擎 (vLLM - latest)
+  # =========================================
+  inference-engine:
+    # 🔴 使用你刚刚拉取成功的版本
+    image: vllm/vllm-openai:latest
+    container_name: gibh_inference
+    runtime: nvidia
+    restart: always
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - VLLM_TRUST_REMOTE_CODE=True
+      - VLLM_USE_V1=1
+    volumes:
+      - ./data/models/Qwen3-VL-8B-Instruct:/model
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    command: >
+      --model /model
+      --served-model-name qwen3-vl
+      --gpu-memory-utilization 0.9
+      --max-model-len 32768
+      --enforce-eager
+      --trust-remote-code
+      --disable-log-stats
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+

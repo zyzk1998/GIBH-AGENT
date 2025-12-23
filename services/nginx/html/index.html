@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GIBH Qwen Agent</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <style>
+        /* ... (样式保持不变，为了节省篇幅，这里省略头部样式，请保留你原有的样式) ... */
+        /* 确保你有 .thought-process 相关的样式，如果没有请从上一次回复中复制 */
+        :root { --bg-color: #ffffff; --chat-width: 800px; --primary-color: #4d6bfe; --text-color: #1f1f1f; --thought-bg: #fcfcfc; --thought-border: #f0f0f0; }
+        body { background-color: var(--bg-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; height: 100vh; display: flex; flex-direction: column; margin: 0; overflow: hidden; color: var(--text-color); }
+        .navbar { background: rgba(255,255,255,0.9); backdrop-filter: blur(10px); position: absolute; top: 0; width: 100%; z-index: 10; padding: 12px 0; border-bottom: 1px solid rgba(0,0,0,0.03); }
+        .brand-logo { font-weight: 600; font-size: 1.1rem; color: #333; display: flex; align-items: center; gap: 8px; }
+        .chat-scroll-area { flex: 1; overflow-y: auto; padding: 80px 20px 200px 20px; scroll-behavior: smooth; }
+        .chat-content { max-width: var(--chat-width); margin: 0 auto; }
+        .message-row { display: flex; margin-bottom: 24px; animation: fadeIn 0.2s ease; }
+        .message-row.user { justify-content: flex-end; }
+        .avatar { width: 32px; height: 32px; border-radius: 6px; margin-right: 12px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; margin-top: 2px; }
+        .avatar.ai { background: #eef2ff; color: var(--primary-color); }
+        .message-container { max-width: 100%; flex: 1; min-width: 0; }
+        .message-row.user .message-container { flex: initial; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; }
+        .bubble { font-size: 15px; line-height: 1.6; color: #374151; }
+        .message-row.user .bubble { background-color: #f4f4f4; color: #000; padding: 8px 14px; border-radius: 18px; border-bottom-right-radius: 4px; text-align: left; display: inline-block; }
+        .bubble p:last-child { margin-bottom: 0; }
+        .bubble pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }
+        .bubble code { color: #d63384; font-size: 0.9em; }
+        
+        /* 🧠 深度思考折叠卡片样式 */
+        .thought-process { margin-bottom: 12px; border: 1px solid #e5e7eb; border-radius: 8px; background-color: #f9fafb; overflow: hidden; }
+        .thought-summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: #6b7280; display: flex; align-items: center; background: #f3f4f6; user-select: none; transition: background 0.2s; }
+        .thought-summary:hover { background: #e5e7eb; }
+        .thought-summary i { margin-right: 6px; color: #8b5cf6; }
+        .thought-content { padding: 12px; font-size: 13px; color: #4b5563; line-height: 1.6; border-top: 1px solid #e5e7eb; display: none; white-space: pre-wrap; font-family: 'Menlo', 'Monaco', 'Courier New', monospace; background: #ffffff; }
+        .thought-content.open { display: block; animation: fadeIn 0.3s; }
+        
+        .user-actions { display: flex; flex-direction: row; justify-content: flex-end; gap: 15px; margin-top: 6px; opacity: 0; transition: opacity 0.2s; padding-right: 4px; width: 100%; }
+        .message-row.user:hover .user-actions { opacity: 1; }
+        .action-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #9ca3af; cursor: pointer; transition: color 0.2s; white-space: nowrap; }
+        .action-item:hover { color: #4b5563; }
+        .params-form { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .form-label { font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
+        .form-text { font-size: 12px; color: #999; }
+        .form-control, .form-select { font-size: 14px; border-radius: 6px; }
+        .btn-run { width: 100%; margin-top: 15px; font-weight: 600; }
+        .accordion-button { padding: 10px 15px; font-size: 14px; font-weight: 600; }
+        .accordion-button:not(.collapsed) { background-color: #eef2ff; color: #4d6bfe; }
+        .accordion-body { padding: 15px; background: #fcfcfc; }
+        .workflow-monitor { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .step-item { display: flex; align-items: center; padding: 10px 0; border-bottom: 1px solid #f0f0f0; }
+        .step-item:last-child { border-bottom: none; }
+        .step-icon { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 12px; font-size: 12px; flex-shrink: 0; }
+        .step-icon.pending { background: #f3f4f6; color: #9ca3af; }
+        .step-icon.running { background: #eef2ff; color: #4d6bfe; animation: pulse 1.5s infinite; }
+        .step-icon.success { background: #d1fae5; color: #059669; }
+        .step-icon.failed { background: #fee2e2; color: #dc2626; }
+        .step-name { font-size: 14px; font-weight: 500; color: #374151; flex: 1; }
+        .step-status-text { font-size: 12px; color: #6b7280; }
+        .data-selector-container { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; overflow: hidden; margin-top: 10px; }
+        .data-selector-header { padding: 12px 15px; background: #f9fafb; border-bottom: 1px solid #eee; font-weight: 600; color: #333; font-size: 14px; }
+        .data-selector-list { max-height: 300px; overflow-y: auto; padding: 5px 0; }
+        .dataset-item { display: flex; align-items: center; padding: 10px 15px; cursor: pointer; transition: background 0.2s; border-bottom: 1px solid #f9f9f9; }
+        .dataset-item:last-child { border-bottom: none; }
+        .dataset-item:hover { background: #f0f7ff; }
+        .dataset-item.selected { background: #eef2ff; border-left: 3px solid var(--primary-color); }
+        .dataset-item input { margin-right: 12px; transform: scale(1.2); cursor: pointer; }
+        .dataset-info { display: flex; flex-direction: column; pointer-events: none; } 
+        .dataset-name { font-size: 13px; font-weight: 500; color: #333; }
+        .dataset-meta { font-size: 11px; color: #999; margin-top: 2px; }
+        .data-selector-footer { padding: 10px 15px; border-top: 1px solid #eee; background: #fff; display: flex; justify-content: flex-end; }
+        .analysis-report { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .report-title { font-size: 16px; font-weight: 700; color: #333; }
+        .report-section { margin-top: 20px; }
+        .report-section h6 { font-weight: 600; color: #555; margin-bottom: 10px; }
+        .llm-diagnosis { background: #f0f7ff; border-left: 4px solid #4d6bfe; padding: 15px; border-radius: 4px; font-size: 14px; line-height: 1.6; color: #333; }
+        @media print {
+            @page { margin: 0; size: auto; }
+            body * { visibility: hidden; }
+            body { margin: 1.6cm; background: white; }
+            .analysis-report, .analysis-report * { visibility: visible; }
+            .analysis-report { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; border: none; box-shadow: none; padding-top: 60px; }
+            .report-header button { display: none !important; }
+            body::before { content: "GIBH Qwen 生信智能助手"; visibility: visible; position: fixed; top: 0; left: 0; right: 0; text-align: center; font-size: 16pt; font-weight: bold; color: #2c3e50; border-bottom: 2px solid #4d6bfe; padding-bottom: 10px; background-color: white; z-index: 9999; }
+            body::after { content: "Generated by GIBH Qwen Agent | 仅供科研参考"; visibility: visible; position: fixed; bottom: 0; left: 0; right: 0; text-align: center; font-size: 9pt; color: #999; background-color: white; padding-top: 5px; border-top: 1px solid #eee; }
+            .accordion-collapse { display: block !important; height: auto !important; visibility: visible !important; }
+            .accordion-button { pointer-events: none; background: none !important; color: black !important; padding-left: 0; font-weight: bold; border: none; }
+            .accordion-button::after { display: none !important; }
+            .accordion-item { border: none; border-bottom: 1px solid #eee; }
+            img { max-width: 90% !important; display: block; margin: 10px auto; page-break-inside: avoid; }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+        .input-wrapper { position: fixed; bottom: 30px; left: 0; width: 100%; display: flex; justify-content: center; padding: 0 20px; z-index: 100; pointer-events: none; }
+        .chat-input-panel { pointer-events: auto; width: 100%; max-width: var(--chat-width); background: #fff; border: 1px solid #e6e6e6; border-radius: 20px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05); padding: 10px 14px; display: flex; flex-direction: column; transition: box-shadow 0.2s; }
+        .chat-input-panel:focus-within { box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1); border-color: #d0d0d0; }
+        .input-area { width: 100%; margin-bottom: 4px; display: flex; align-items: center; }
+        .main-input { width: 100%; border: none; outline: none; font-size: 16px; line-height: 1.5; resize: none; color: #333; background: transparent; font-family: inherit; height: 24px; min-height: 24px; max-height: 200px; overflow-y: hidden; padding: 0; margin: 0; box-sizing: border-box; }
+        .main-input::placeholder { color: #aaa; }
+        .main-input:disabled { background: transparent; cursor: not-allowed; color: #999; }
+        .toolbar { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+        .toolbar-left { display: flex; gap: 10px; }
+        .toolbar-right { display: flex; align-items: center; gap: 10px; }
+        .icon-btn { width: 34px; height: 34px; border-radius: 8px; border: none; background: transparent; color: #666; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s, color 0.2s; font-size: 18px; }
+        .icon-btn:hover { background: #f5f5f5; color: #333; }
+        .icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+        .send-btn { width: 34px; height: 34px; border-radius: 50%; background: #e5e5e5; color: #fff; border: none; display: flex; align-items: center; justify-content: center; cursor: not-allowed; transition: all 0.2s; margin-left: 8px; }
+        .send-btn.active { background: #333; cursor: pointer; }
+        .send-btn i { font-size: 16px; }
+        .file-chips-area { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+        .file-chip { background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: #555; display: flex; align-items: center; gap: 6px; }
+        #dropOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); z-index: 999; display: none; flex-direction: column; justify-content: center; align-items: center; color: var(--primary-color); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+    <div id="dropOverlay">
+        <i class="bi bi-cloud-upload" style="font-size: 48px; margin-bottom: 10px;"></i>
+        <h4>释放文件以上传</h4>
+    </div>
+
+    <nav class="navbar">
+        <div class="container d-flex justify-content-center">
+            <div class="brand-logo"><i class="bi bi-stars" style="color: var(--primary-color);"></i> GIBH Qwen Agent</div>
+        </div>
+    </nav>
+
+    <div class="chat-scroll-area" id="chatBox">
+        <div class="chat-content" id="chatContent">
+            <!-- 开场白 -->
+            <div class="message-row ai">
+                <div class="avatar ai"><i class="bi bi-robot"></i></div>
+                <div class="message-container">
+                    <div class="bubble">
+                        <p>你好！我是您的 <b>GIBH Qwen 生信智能助手</b>。</p>
+                        <p>我可以协助您进行工具查询、数据上传及 Seurat 流程规划。同时，我也具备<b>视觉分析能力</b>，您可以发送：</p>
+                        <ul>
+                            <li>📸 <b>报错截图</b>：获取故障诊断与修复建议。</li>
+                            <li>📊 <b>生信图表</b>：解读 UMAP、热图等数据的生物学意义。</li>
+                        </ul>
+                        <p style="margin-top: 10px; font-size: 12px; color: #888;">
+                            <i class="bi bi-info-circle"></i> 试着直接拖入一张图片，或者问我："帮我规划一个单细胞流程"。
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-wrapper">
+        <div class="chat-input-panel">
+            <div id="filePreviewArea" class="file-chips-area"></div>
+            <div class="input-area">
+                <textarea id="userInput" class="main-input" placeholder="尽管问..." rows="1" oninput="autoResize(this); checkInput();" onkeydown="handleEnter(event)"></textarea>
+            </div>
+            <div class="toolbar">
+                <div class="toolbar-left"></div>
+                <div class="toolbar-right">
+                    <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(this.files)" multiple>
+                    <button id="uploadBtn" class="icon-btn" onclick="document.getElementById('fileInput').click()" title="上传文件">
+                        <i class="bi bi-paperclip"></i>
+                    </button>
+                    <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatContent = document.getElementById('chatContent');
+        const chatScrollArea = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const filePreviewArea = document.getElementById('filePreviewArea');
+        const dropOverlay = document.getElementById('dropOverlay');
+
+        let chatHistory = []; 
+        let uploadedFiles = []; 
+        let isProcessing = false; 
+
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+            if (textarea.scrollHeight > 200) {
+                textarea.style.overflowY = "auto";
+            } else {
+                textarea.style.overflowY = "hidden";
+            }
+        }
+        window.onload = () => autoResize(userInput);
+
+        function checkInput() {
+            if (isProcessing) { sendBtn.classList.remove('active'); return; }
+            if (userInput.value.trim() !== '' || uploadedFiles.length > 0) sendBtn.classList.add('active');
+            else sendBtn.classList.remove('active');
+        }
+
+        function handleEnter(e) { 
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!isProcessing) sendMessage();
+            }
+        }
+
+        function toggleLoadingState(isLoading) {
+            isProcessing = isLoading;
+            userInput.disabled = isLoading;
+            uploadBtn.disabled = isLoading;
+            if (isLoading) {
+                sendBtn.disabled = true; sendBtn.classList.remove('active'); userInput.style.cursor = 'wait';
+            } else {
+                sendBtn.disabled = false; userInput.style.cursor = 'text'; userInput.focus(); checkInput();
+            }
+        }
+
+        window.addEventListener('dragenter', (e) => { if(!isProcessing) { e.preventDefault(); dropOverlay.style.display = 'flex'; } });
+        window.addEventListener('dragleave', (e) => { e.preventDefault(); if (e.clientX === 0 && e.clientY === 0) dropOverlay.style.display = 'none'; });
+        window.addEventListener('dragover', (e) => e.preventDefault());
+        window.addEventListener('drop', (e) => { e.preventDefault(); dropOverlay.style.display = 'none'; if (!isProcessing && e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files); });
+        window.addEventListener('paste', (e) => { if (!isProcessing && e.clipboardData.files.length > 0) { e.preventDefault(); handleFileSelect(e.clipboardData.files); } });
+
+        async function handleFileSelect(files) {
+            if (files.length === 0) return;
+            toggleLoadingState(true);
+            for (let i = 0; i < files.length; i++) await uploadSingleFile(files[i]);
+            document.getElementById('fileInput').value = ''; 
+            toggleLoadingState(false);
+        }
+
+        async function uploadSingleFile(file) {
+            const tempId = 'temp-' + Date.now();
+            addFileTag(file.name, true, tempId);
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                removeFileTag(tempId);
+                if (data.status === 'success') {
+                    uploadedFiles.push({ id: data.file_id, name: data.file_name });
+                    renderFileTags();
+                } else alert(`上传失败: ${data.message}`);
+            } catch (e) { removeFileTag(tempId); alert(`网络错误: ${e}`); }
+        }
+
+        function renderFileTags() {
+            filePreviewArea.innerHTML = '';
+            uploadedFiles.forEach((f, index) => {
+                const div = document.createElement('div');
+                div.className = 'file-chip';
+                div.innerHTML = `<i class="bi bi-file-earmark-text"></i><span>${f.name}</span><i class="bi bi-x" style="cursor:pointer" onclick="removeFile(${index})"></i>`;
+                filePreviewArea.appendChild(div);
+            });
+        }
+        function addFileTag(name, isLoading, tempId) {
+            const div = document.createElement('div');
+            div.className = 'file-chip'; div.id = tempId;
+            div.innerHTML = `<i class="bi bi-${isLoading ? 'hourglass-split' : 'file-earmark-text'}"></i><span>${name} ${isLoading ? '(上传中...)' : ''}</span>`;
+            filePreviewArea.appendChild(div);
+        }
+        function removeFileTag(id) { const el = document.getElementById(id); if (el) el.remove(); }
+        function removeFile(index) { if(!isProcessing) { uploadedFiles.splice(index, 1); renderFileTags(); checkInput(); } }
+
+        async function sendMessage(selectedTool = null, originalQuery = null, toolParams = null, workflowData = null, useHistoryFiles = false) {
+            if (isProcessing) return;
+            let text = userInput.value.trim();
+            if (originalQuery) text = originalQuery;
+            
+            if (!text && uploadedFiles.length === 0 && !workflowData && !useHistoryFiles) return;
+
+            if (!selectedTool && !workflowData && !useHistoryFiles) {
+                appendMessage('user', text || `[发送了 ${uploadedFiles.length} 个文件]`);
+                userInput.value = ''; userInput.style.height = '24px'; 
+                checkInput();
+            }
+
+            toggleLoadingState(true);
+            const startTime = Date.now();
+
+            // 1. 创建 AI 消息容器 (初始显示 Loading)
+            const aiMessageDiv = appendMessage('ai', '<span class="spinner-border spinner-border-sm text-primary" role="status"></span><span style="margin-left:8px; color:#666;">思考中...</span>', null, null, true);
+            const aiContentDiv = aiMessageDiv; 
+
+            const payload = { 
+                message: text, 
+                history: chatHistory, 
+                selected_tool: selectedTool, 
+                uploaded_files: uploadedFiles,
+                tool_params: toolParams,
+                workflow_data: workflowData,
+                use_history_files: useHistoryFiles
+            };
+            
+            try {
+                const res = await fetch('/api/chat', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(payload) 
+                });
+
+                if (!res.ok) throw new Error(await res.text());
+
+                // 🌟 核心修改：判断响应类型
+                const contentType = res.headers.get("content-type");
+
+                // === 分支 A: 收到的是 JSON (工具/工作流卡片) ===
+                if (contentType && contentType.includes("application/json")) {
+                    const data = await res.json();
+                    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+                    
+                    // 移除刚才创建的临时气泡
+                    aiMessageDiv.closest('.message-row').remove();
+
+                    if (data.type === 'workflow_config') {
+                        appendMessage('ai', data.reply, data.thought, duration);
+                        renderWorkflowForm(data);
+                    }
+                    else if (data.type === 'tool_config') {
+                        appendMessage('ai', data.reply, data.thought, duration);
+                        renderToolForm(data);
+                    }
+                    else if (data.type === 'workflow_started') {
+                        appendMessage('ai', data.reply, data.thought, duration);
+                        startWorkflowPolling(data.run_id);
+                    }
+                    else if (data.type === 'data_selector') {
+                        appendMessage('ai', data.reply, data.thought, duration);
+                        renderDataSelector(data.datasets);
+                    }
+                    else if (data.type === 'analysis_report') {
+                        renderAnalysisReport(data);
+                    }
+                    else if (data.type === 'choice') {
+                        let html = `<p>${data.reply}</p><div class="tool-grid">`;
+                        data.candidates.forEach((tool, index) => {
+                            const name = tool.name || "Unknown Tool";
+                            const toolStr = JSON.stringify(tool).replace(/"/g, '&quot;');
+                            html += `<div class="tool-card" onclick="selectTool(${toolStr}, '${text}')"><i class="bi bi-box-seam" style="position:absolute; right:-5px; bottom:-5px; font-size:50px; opacity:0.05;"></i><strong>${index + 1}. ${name}</strong></div>`;
+                        });
+                        html += `</div>`;
+                        appendMessage('ai', html, data.thought, duration);
+                    } 
+                    else {
+                        // 兜底 JSON 处理
+                        let content = data.reply;
+                        let codeBlock = "";
+                        if (content.includes("### 🤖 策略代码")) {
+                            const parts = content.split("### 🤖 策略代码");
+                            const preText = parts[0];
+                            const codeAndResult = parts[1];
+                            const codeMatch = codeAndResult.match(/```python([\s\S]*?)```/);
+                            if (codeMatch) codeBlock = codeMatch[1].trim();
+                            
+                            let resultText = "";
+                            if (codeAndResult.includes("### ✅ 执行结果")) {
+                                const resultParts = codeAndResult.split("### ✅ 执行结果");
+                                const rawResult = resultParts[1].match(/```text([\s\S]*?)```/);
+                                if (rawResult) resultText = rawResult[1].trim();
+                            }
+
+                            let finalHtml = marked.parse(preText);
+                            if (codeBlock) {
+                                finalHtml += `<button class="code-collapse-btn" onclick="toggleCode(this)"><i class="bi bi-code-slash"></i> 查看策略代码</button><div class="code-block-container"><pre><code class="language-python">${codeBlock}</code></pre></div>`;
+                            }
+                            if (resultText) finalHtml += formatExecutionResult(resultText);
+                            content = finalHtml;
+                        } else {
+                            content = marked.parse(content);
+                        }
+                        appendMessage('ai', content, data.thought, duration, true);
+                    }
+                    return;
+                }
+
+                // === 分支 B: 收到的是流 (打字机效果) ===
+                aiContentDiv.innerHTML = ''; // 清空 "Thinking..."
+                
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = "";
+                
+                // 🧠 思考过程相关的变量
+                let thoughtBuffer = "";
+                let isThinking = false;
+                let hasThoughtBlock = false;
+                let finalAnswer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    fullText += chunk; 
+
+                    // --- 🧠 实时解析 <think> 标签 ---
+                    // 1. 检测思考开始
+                    if (chunk.includes('<think>')) {
+                        isThinking = true;
+                        hasThoughtBlock = true;
+                        // 创建折叠组件结构 (如果还没创建)
+                        if (!aiContentDiv.querySelector('.thought-process')) {
+                            aiContentDiv.innerHTML = `
+                                <div class="thought-process">
+                                    <div class="thought-summary" onclick="toggleThought(this)">
+                                        <i class="bi bi-stars"></i> 深度思考过程 (点击展开)
+                                    </div>
+                                    <div class="thought-content"></div>
+                                </div>
+                                <div class="final-answer"></div>
+                            `;
+                        }
+                    }
+
+                    // 2. 检测思考结束
+                    if (chunk.includes('</think>')) {
+                        isThinking = false;
+                        // 把 </think> 之前的内容追加到思考区，之后的追加到回答区
+                        const parts = chunk.split('</think>');
+                        thoughtBuffer += parts[0].replace('<think>', ''); // 清理标签
+                        
+                        // 更新思考区 UI
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
+
+                        // 处理剩余的回答部分
+                        if (parts[1]) {
+                            finalAnswer += parts[1];
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                        continue; // 跳过本次循环的剩余逻辑
+                    }
+
+                    // 3. 正在思考中...
+                    if (isThinking) {
+                        thoughtBuffer += chunk.replace('<think>', '');
+                        const thoughtDiv = aiContentDiv.querySelector('.thought-content');
+                        // 实时显示思考内容
+                        if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer; 
+                    } 
+                    // 4. 正在输出正式回答...
+                    else {
+                        // 如果从来没出现过 <think>，直接渲染到根节点
+                        if (!hasThoughtBlock) {
+                            finalAnswer += chunk;
+                            aiContentDiv.innerHTML = marked.parse(finalAnswer);
+                        } else {
+                            // 如果有思考块，渲染到 .final-answer 容器
+                            finalAnswer += chunk;
+                            const answerDiv = aiContentDiv.querySelector('.final-answer');
+                            if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
+                        }
+                    }
+                    
+                    scrollToBottom();
+                }
+                
+                // 记录历史
+                chatHistory.push({ user: text, ai: fullText });
+
+            } catch (error) {
+                aiContentDiv.innerHTML = `<span style="color:red">请求失败: ${error.message}</span>`;
+            } finally { 
+                toggleLoadingState(false); 
+            }
+        }
+
+        function renderAnalysisReport(data) {
+            const reportId = `report-${Date.now()}`;
+            const reportData = data.report_data;
+            const diagnosis = data.diagnosis;
+            
+            let html = `
+            <div class="analysis-report" id="${reportId}">
+                <div class="report-header">
+                    <span class="report-title"><i class="bi bi-file-earmark-medical"></i> 单细胞分析报告</span>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
+                        <i class="bi bi-printer"></i> 打印/保存PDF
+                    </button>
+                </div>
+                
+                <div class="report-section">
+                    <h6>1. 执行流程详情</h6>
+                    <div class="accordion" id="acc-${reportId}">`;
+            
+            reportData.steps_details.forEach((step, index) => {
+                const stepId = `step-${reportId}-${index}`;
+                const statusIcon = step.status === 'success' ? '✅' : '❌';
+                const plotHtml = step.plot ? `<div class="mt-2"><img src="${step.plot}" style="max-width:100%; border-radius:4px;"></div>` : '';
+                
+                html += `
+                <div class="accordion-item">
+                    <h2 class="accordion-header">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">
+                            ${statusIcon} ${step.name} <span class="ms-auto text-muted small">${step.summary}</span>
+                        </button>
+                    </h2>
+                    <div id="${stepId}" class="accordion-collapse collapse" data-bs-parent="#acc-${reportId}">
+                        <div class="accordion-body">
+                            <div class="small text-secondary mb-2">${step.details}</div>
+                            ${plotHtml}
+                        </div>
+                    </div>
+                </div>`;
+            });
+            
+            html += `
+                    </div>
+                </div>
+                
+                <div class="report-section">
+                    <h6>2. AI 专家诊断与建议</h6>
+                    <div class="llm-diagnosis">
+                        ${marked.parse(diagnosis)}
+                    </div>
+                </div>
+                
+                <div class="report-section">
+                    <h6>3. 最终可视化结果</h6>
+                    ${reportData.final_plot ? `<img src="${reportData.final_plot}" style="width:100%; border-radius:8px;">` : '无图表生成'}
+                </div>
+            </div>`;
+            
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function renderDataSelector(datasets) {
+            const selectorId = `ds-${Date.now()}`;
+            let html = `
+            <div class="data-selector-container" id="${selectorId}">
+                <div class="data-selector-header">
+                    <i class="bi bi-folder2-open"></i> 选择 Galaxy 历史数据
+                </div>
+                <div class="data-selector-list">`;
+            
+            datasets.forEach(d => {
+                html += `
+                <div class="dataset-item" onclick="toggleCheckbox(this)">
+                    <input type="checkbox" class="form-check-input" value="${d.id}" data-name="${d.name}" onclick="event.stopPropagation(); toggleCheckbox(this.parentElement, true)">
+                    <div class="dataset-info">
+                        <span class="dataset-name">${d.hid}: ${d.name}</span>
+                        <span class="dataset-meta">${d.ext} | ${d.size}</span>
+                    </div>
+                </div>`;
+            });
+            
+            html += `
+                </div>
+                <div class="data-selector-footer">
+                    <button class="btn btn-primary btn-sm" onclick="submitDataSelection('${selectorId}')">
+                        确认使用 <i class="bi bi-check2"></i>
+                    </button>
+                </div>
+            </div>`;
+            
+            appendMessage('ai', html, null, null, true);
+        }
+
+        function toggleCheckbox(row, fromCheckbox = false) {
+            const checkbox = row.querySelector('input[type="checkbox"]');
+            if (!fromCheckbox) {
+                checkbox.checked = !checkbox.checked;
+            }
+            if(checkbox.checked) row.classList.add('selected');
+            else row.classList.remove('selected');
+        }
+
+        function submitDataSelection(selectorId) {
+            const container = document.getElementById(selectorId);
+            const checkboxes = container.querySelectorAll('input:checked');
+            if (checkboxes.length === 0) { alert("请至少选择一个文件"); return; }
+            
+            uploadedFiles = []; 
+            let selectedNames = [];
+            checkboxes.forEach(cb => {
+                const name = cb.getAttribute('data-name');
+                uploadedFiles.push({ id: cb.value, name: name });
+                selectedNames.push(name);
+            });
+            
+            const btn = container.querySelector('button');
+            btn.disabled = true; btn.innerText = "已选择";
+            
+            const userMsg = `我已选择以下文件：\n${selectedNames.join('\n')}\n\n请基于这些文件，继续规划 Seurat 单细胞分析工作流。`;
+            appendMessage('user', userMsg);
+            
+            sendMessage(null, "已选择文件，请继续规划 Seurat 单细胞工作流", null, null, true);
+        }
+
+        function startWorkflowPolling(runId) {
+            const monitorId = `monitor-${runId}`;
+            const html = `<div class="workflow-monitor" id="${monitorId}"><h6>🚀 工作流执行进度</h6><div class="steps-container"></div></div>`;
+            appendMessage('ai', html, null, null, true);
+            
+            const container = document.getElementById(monitorId).querySelector('.steps-container');
+            
+            const poll = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/workflow/status/${runId}`);
+                    const data = await res.json();
+                    
+                    if (data.status === 'not_found') { clearInterval(poll); return; }
+                    
+                    let stepsHtml = '';
+                    data.steps_status.forEach((step, index) => {
+                        let iconClass = 'pending';
+                        let iconContent = '<i class="bi bi-circle"></i>';
+                        if (step.status === 'running') { iconClass = 'running'; iconContent = '<i class="bi bi-arrow-repeat"></i>'; }
+                        else if (step.status === 'success') { iconClass = 'success'; iconContent = '<i class="bi bi-check-lg"></i>'; }
+                        else if (step.status === 'failed') { iconClass = 'failed'; iconContent = '<i class="bi bi-x-lg"></i>'; }
+                        
+                        stepsHtml += `<div class="step-item"><div class="step-icon ${iconClass}">${iconContent}</div><div class="step-name">${step.name || 'Step ' + (index + 1)}</div><div class="step-status-text">${step.status}</div></div>`;
+                    });
+                    container.innerHTML = stepsHtml;
+                    
+                    if (data.completed) {
+                        clearInterval(poll);
+                        if (data.status === 'success') {
+                            container.innerHTML += `<div class="alert alert-success mt-3 mb-0">🎉 工作流全部执行完成！正在加载报告...</div>`;
+                            
+                            // 🔥🔥🔥 核心修复：调用报告渲染函数！
+                            // 构造 renderAnalysisReport 需要的数据结构
+                            const reportPayload = {
+                                diagnosis: "✅ **分析成功！**\n\n数据已完成全流程处理，下方展示了最终的 UMAP 降维可视化结果及关键质控指标。您可以点击右上角按钮打印或保存此报告。",
+                                report_data: data.report_data // 这里面包含了 final_plot
+                            };
+                            
+                            // 延迟 500ms 让用户看到完成提示，然后弹出大报告
+                            setTimeout(() => {
+                                renderAnalysisReport(reportPayload);
+                                scrollToBottom();
+                            }, 500);
+                            
+                        } else {
+                            container.innerHTML += `<div class="alert alert-danger mt-3 mb-0">❌ 执行出错: ${data.error}</div>`;
+                        }
+                    }
+                } catch (e) { console.error(e); }
+            }, 2000);
+        }
+
+        function renderWorkflowForm(data) {
+            const formId = `wf-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>📋 ${data.workflow_name}</h5><p class="text-muted">请确认或修改每一步的参数：</p><div class="accordion" id="acc-${formId}">`;
+            data.steps.forEach((step, index) => {
+                const stepId = `step-${index}`;
+                formHtml += `
+                <div class="accordion-item">
+                    <h2 class="accordion-header d-flex align-items-center">
+                        <div class="form-check ms-3 me-2">
+                            <input class="form-check-input step-checkbox" type="checkbox" checked data-index="${index}">
+                        </div>
+                        <button class="accordion-button ${index > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">
+                            ${step.name}
+                        </button>
+                    </h2>
+                    <div id="${stepId}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#acc-${formId}">
+                        <div class="accordion-body">
+                            <p class="text-muted small">${step.desc}</p>
+                            <input type="hidden" name="tool_id_${index}" value="${step.tool_id}">
+                            <input type="hidden" name="step_name_${index}" value="${step.name}">`;
+                
+                step.params.forEach(p => {
+                    const inputName = `param_${index}_${p.name}`;
+                    formHtml += `<div class="mb-2"><label class="form-label small">${p.label}</label>`;
+                    if (p.type === 'select') {
+                        formHtml += `<select class="form-select form-select-sm" name="${inputName}">`;
+                        p.options.forEach(opt => {
+                            const selected = opt.value === p.value ? 'selected' : '';
+                            formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`;
+                        });
+                        formHtml += `</select>`;
+                    } else if (p.type === 'boolean') {
+                        const checked = p.value === 'true' ? 'checked' : '';
+                        formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${inputName}" ${checked}></div>`;
+                    } else {
+                        formHtml += `<input type="text" class="form-control form-control-sm" name="${inputName}" value="${p.value || ''}">`;
+                    }
+                    formHtml += `</div>`;
+                });
+                formHtml += `</div></div></div>`;
+            });
+            formHtml += `</div><button class="btn btn-success btn-run mt-3" onclick="submitWorkflow('${formId}', ${data.steps.length})">🚀 执行工作流</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitWorkflow(formId, totalSteps) {
+            const formContainer = document.getElementById(formId);
+            const stepsData = [];
+            
+            const checkboxes = formContainer.querySelectorAll('.step-checkbox');
+            
+            checkboxes.forEach((cb, i) => {
+                if (cb.checked) {
+                    const toolId = formContainer.querySelector(`input[name="tool_id_${i}"]`).value;
+                    const stepName = formContainer.querySelector(`input[name="step_name_${i}"]`).value;
+                    const params = {};
+                    const inputs = formContainer.querySelectorAll(`[name^="param_${i}_"]`);
+                    inputs.forEach(input => {
+                        const originalName = input.name.replace(`param_${i}_`, '');
+                        if (input.type === 'checkbox') params[originalName] = input.checked;
+                        else params[originalName] = input.value;
+                    });
+                    stepsData.push({ name: stepName, tool_id: toolId, params: params });
+                }
+            });
+
+            if (stepsData.length === 0) {
+                alert("请至少选择一个步骤！");
+                return;
+            }
+
+            const btn = formContainer.querySelector('button');
+            btn.disabled = true; btn.innerText = "工作流执行中...";
+            sendMessage(null, "Execute Workflow", null, { steps: stepsData });
+        }
+
+        function renderToolForm(data) {
+            const formId = `form-${Date.now()}`;
+            let formHtml = `<div class="params-form" id="${formId}"><h5>🛠️ ${data.tool_name} 参数配置</h5><hr>`;
+            data.params.forEach(p => {
+                formHtml += `<div class="mb-3"><label class="form-label">${p.label}</label>`;
+                if (p.type === 'select') {
+                    formHtml += `<select class="form-select" name="${p.name}">`;
+                    p.options.forEach(opt => {
+                        const selected = opt.value === p.value ? 'selected' : '';
+                        formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`;
+                    });
+                    formHtml += `</select>`;
+                } else if (p.type === 'boolean') {
+                    const checked = p.value === 'true' ? 'checked' : '';
+                    formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${p.name}" ${checked}></div>`;
+                } else {
+                    formHtml += `<input type="text" class="form-control" name="${p.name}" value="${p.value || ''}">`;
+                }
+                if (p.help) formHtml += `<div class="form-text">${p.help}</div>`;
+                formHtml += `</div>`;
+            });
+            const toolInfoStr = JSON.stringify({name: data.tool_name, id: data.tool_id}).replace(/"/g, '&quot;');
+            formHtml += `<button class="btn btn-primary btn-run" onclick="submitToolForm('${formId}', ${toolInfoStr})">🚀 确认并执行</button></div>`;
+            appendMessage('ai', formHtml, null, null, true);
+        }
+
+        function submitToolForm(formId, toolInfo) {
+            const formContainer = document.getElementById(formId);
+            const inputs = formContainer.querySelectorAll('input, select');
+            const params = {};
+            inputs.forEach(input => {
+                if (input.type === 'checkbox') params[input.name] = input.checked;
+                else params[input.name] = input.value;
+            });
+            const btn = formContainer.querySelector('button');
+            btn.disabled = true; btn.innerText = "已提交...";
+            sendMessage(toolInfo, `Run ${toolInfo.name} with params`, params);
+        }
+
+        function formatExecutionResult(text) {
+            text = text.trim();
+            let tableHtml = '<div class="props-panel">';
+            let hasData = false;
+            if (text.startsWith('{') && text.endsWith('}')) {
+                try {
+                    let jsonStr = text.replace(/'/g, '"').replace(/\bFalse\b/g, 'false').replace(/\bTrue\b/g, 'true').replace(/\bNone\b/g, 'null');
+                    const obj = JSON.parse(jsonStr);
+                    for (const [key, value] of Object.entries(obj)) {
+                        hasData = true;
+                        const displayValue = (typeof value === 'object' && value !== null) ? JSON.stringify(value) : value;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${key}</div><div class="prop-value">${displayValue}</div></div>`;
+                    }
+                } catch (e) { console.warn("Dict parse failed"); }
+            }
+            if (!hasData) {
+                const lines = text.split('\n');
+                lines.forEach(line => {
+                    const match = line.match(/^\s*([^:]+):\s*(.*)$/);
+                    if (match) {
+                        hasData = true;
+                        tableHtml += `<div class="prop-row"><div class="prop-key">${match[1].trim()}</div><div class="prop-value">${match[2].trim()}</div></div>`;
+                    }
+                });
+            }
+            tableHtml += '</div>';
+            return hasData ? `<h6>✅ 执行结果</h6>${tableHtml}` : `<h6>✅ 执行结果</h6><pre>${text}</pre>`;
+        }
+
+        function toggleCode(btn) {
+            const container = btn.nextElementSibling;
+            if (container.style.display === 'block') {
+                container.style.display = 'none';
+                btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码';
+            } else {
+                container.style.display = 'block';
+                btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码';
+            }
+        }
+
+        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
+            let thoughtHtml = '';
+            if (role === 'ai' && thoughtContent) {
+                thoughtHtml = `<div class="thought-block"><div class="thought-header" onclick="toggleThought(this)"><div class="thought-title"><i class="bi bi-stars thought-icon"></i> 深度思考</div><i class="bi bi-chevron-down thought-arrow"></i></div><div class="thought-content">${marked.parse(thoughtContent)}</div></div>`;
+            }
+            let footerHtml = '';
+            if (role === 'ai' && duration) {
+                footerHtml = `<div style="margin-top:5px; font-size:12px; color:#999; display:flex; gap:10px;"><span>${duration}s</span><i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)"></i></div>`;
+            }
+            let userActionsHtml = '';
+            if (role === 'user') {
+                userActionsHtml = `
+                <div class="user-actions">
+                    <div class="action-item" onclick="editMessage(this)">
+                        <i class="bi bi-pencil"></i> 编辑
+                    </div>
+                    <div class="action-item" onclick="copyText(this)">
+                        <i class="bi bi-copy"></i> 复制
+                    </div>
+                </div>`;
+            }
+            const bubbleContent = isHtml ? content : marked.parse(content);
+            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container">${thoughtHtml}<div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+            return row.querySelector('.bubble');
+        }
+
+        function renderSuggestions(parentElement, suggestions) {
+            if (!suggestions || suggestions.length === 0) return;
+            const chipContainer = document.createElement('div');
+            chipContainer.className = 'suggestion-chips';
+            suggestions.forEach(text => {
+                const chip = document.createElement('div');
+                chip.className = 'chip-btn';
+                chip.innerText = text;
+                chip.onclick = () => { userInput.value = text; sendMessage(); };
+                chipContainer.appendChild(chip);
+            });
+            parentElement.parentElement.appendChild(chipContainer);
+            scrollToBottom();
+        }
+
+        function toggleThought(header) {
+            const content = header.nextElementSibling;
+            const icon = header.querySelector('.bi-chevron-down');
+            if (content.style.display === 'block') {
+                content.style.display = 'none';
+                icon.style.transform = 'rotate(0deg)';
+            } else {
+                content.style.display = 'block';
+                icon.style.transform = 'rotate(180deg)';
+            }
+        }
+
+        function copyText(btn) {
+            let text = "";
+            const container = btn.closest('.message-container');
+            if (container) {
+                text = container.querySelector('.bubble').innerText;
+            }
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const icon = btn.querySelector('i');
+                    if(icon) {
+                        const originalClass = icon.className;
+                        icon.className = 'bi bi-check';
+                        setTimeout(() => icon.className = originalClass, 2000);
+                    }
+                });
+            } else {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                textArea.style.position = "fixed"; textArea.style.left = "-9999px";
+                document.body.appendChild(textArea); textArea.focus(); textArea.select();
+                try { document.execCommand('copy'); } catch (err) {}
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function editMessage(btn) {
+            const container = btn.closest('.message-container');
+            const text = container.querySelector('.bubble').innerText;
+            userInput.value = text;
+            userInput.focus();
+            autoResize(userInput);
+            checkInput();
+        }
+
+        function selectTool(tool, query) { appendMessage('user', `我选择运行: <b>${tool.name}</b>`); sendMessage(tool, query); }
+        function scrollToBottom() { chatScrollArea.scrollTop = chatScrollArea.scrollHeight; }
+    </script>
+</body>
+</html>
