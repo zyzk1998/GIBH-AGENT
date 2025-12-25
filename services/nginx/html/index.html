@@ -4,16 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GIBH Qwen Agent</title>
+    <!-- 核心库 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/atom-one-dark.min.css">
+    
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     
     <style>
-        /* ... (样式保持不变，为了节省篇幅，这里省略头部样式，请保留你原有的样式) ... */
-        /* 确保你有 .thought-process 相关的样式，如果没有请从上一次回复中复制 */
+        /* 样式保持不变，直接复用 */
         :root { --bg-color: #ffffff; --chat-width: 800px; --primary-color: #4d6bfe; --text-color: #1f1f1f; --thought-bg: #fcfcfc; --thought-border: #f0f0f0; }
-        body { background-color: var(--bg-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; height: 100vh; display: flex; flex-direction: column; margin: 0; overflow: hidden; color: var(--text-color); }
+        body { background-color: var(--bg-color); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; height: 100vh; display: flex; flex-direction: column; margin: 0; overflow: hidden; color: var(--text-color); }
         .navbar { background: rgba(255,255,255,0.9); backdrop-filter: blur(10px); position: absolute; top: 0; width: 100%; z-index: 10; padding: 12px 0; border-bottom: 1px solid rgba(0,0,0,0.03); }
         .brand-logo { font-weight: 600; font-size: 1.1rem; color: #333; display: flex; align-items: center; gap: 8px; }
         .chat-scroll-area { flex: 1; overflow-y: auto; padding: 80px 20px 200px 20px; scroll-behavior: smooth; }
@@ -24,24 +27,29 @@
         .avatar.ai { background: #eef2ff; color: var(--primary-color); }
         .message-container { max-width: 100%; flex: 1; min-width: 0; }
         .message-row.user .message-container { flex: initial; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; }
-        .bubble { font-size: 15px; line-height: 1.6; color: #374151; }
+        .bubble { font-size: 15px; line-height: 1.6; color: #374151; position: relative; }
         .message-row.user .bubble { background-color: #f4f4f4; color: #000; padding: 8px 14px; border-radius: 18px; border-bottom-right-radius: 4px; text-align: left; display: inline-block; }
-        .bubble p:last-child { margin-bottom: 0; }
-        .bubble pre { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; }
-        .bubble code { color: #d63384; font-size: 0.9em; }
-        
-        /* 🧠 深度思考折叠卡片样式 */
+        .code-block-wrapper { margin: 10px 0; border-radius: 6px; overflow: hidden; background: #282c34; border: 1px solid #3e4451; }
+        .code-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: #21252b; color: #abb2bf; font-size: 12px; border-bottom: 1px solid #3e4451; }
+        .copy-btn { background: transparent; border: none; color: #abb2bf; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 4px; transition: color 0.2s; }
+        .copy-btn:hover { color: #fff; }
+        .bubble pre { margin: 0; padding: 12px; overflow-x: auto; background: transparent; }
+        .bubble code { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 13px; }
         .thought-process { margin-bottom: 12px; border: 1px solid #e5e7eb; border-radius: 8px; background-color: #f9fafb; overflow: hidden; }
         .thought-summary { padding: 8px 12px; cursor: pointer; font-size: 12px; color: #6b7280; display: flex; align-items: center; background: #f3f4f6; user-select: none; transition: background 0.2s; }
         .thought-summary:hover { background: #e5e7eb; }
         .thought-summary i { margin-right: 6px; color: #8b5cf6; }
         .thought-content { padding: 12px; font-size: 13px; color: #4b5563; line-height: 1.6; border-top: 1px solid #e5e7eb; display: none; white-space: pre-wrap; font-family: 'Menlo', 'Monaco', 'Courier New', monospace; background: #ffffff; }
         .thought-content.open { display: block; animation: fadeIn 0.3s; }
-        
+        .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 11px; color: #9ca3af; padding: 0 2px; height: 20px; }
+        .generation-timer { display: flex; align-items: center; gap: 4px; font-family: monospace; color: #6b7280; background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
         .user-actions { display: flex; flex-direction: row; justify-content: flex-end; gap: 15px; margin-top: 6px; opacity: 0; transition: opacity 0.2s; padding-right: 4px; width: 100%; }
         .message-row.user:hover .user-actions { opacity: 1; }
         .action-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #9ca3af; cursor: pointer; transition: color 0.2s; white-space: nowrap; }
         .action-item:hover { color: #4b5563; }
+        .lightbox { display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.9); justify-content: center; align-items: center; }
+        .lightbox img { max-width: 90%; max-height: 90%; border-radius: 4px; box-shadow: 0 0 20px rgba(255,255,255,0.1); }
+        .lightbox-close { position: absolute; top: 20px; right: 30px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
         .params-form { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 20px; margin-top: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
         .form-label { font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
         .form-text { font-size: 12px; color: #999; }
@@ -110,11 +118,13 @@
         .send-btn { width: 34px; height: 34px; border-radius: 50%; background: #e5e5e5; color: #fff; border: none; display: flex; align-items: center; justify-content: center; cursor: not-allowed; transition: all 0.2s; margin-left: 8px; }
         .send-btn.active { background: #333; cursor: pointer; }
         .send-btn i { font-size: 16px; }
+        .stop-btn { display: none; background-color: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 20px; padding: 4px 12px; font-size: 12px; cursor: pointer; align-items: center; gap: 4px; transition: all 0.2s; pointer-events: auto; }
+        .stop-btn:hover { background-color: #fecaca; }
+        .stop-btn.show { display: flex; }
         .file-chips-area { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
         .file-chip { background: #f7f7f7; border: 1px solid #eee; border-radius: 6px; padding: 2px 8px; font-size: 12px; color: #555; display: flex; align-items: center; gap: 6px; }
         #dropOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); z-index: 999; display: none; flex-direction: column; justify-content: center; align-items: center; color: var(--primary-color); }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
 </head>
 <body>
@@ -122,6 +132,11 @@
     <div id="dropOverlay">
         <i class="bi bi-cloud-upload" style="font-size: 48px; margin-bottom: 10px;"></i>
         <h4>释放文件以上传</h4>
+    </div>
+
+    <div id="lightbox" class="lightbox" onclick="closeLightbox()">
+        <span class="lightbox-close">&times;</span>
+        <img id="lightbox-img" src="">
     </div>
 
     <nav class="navbar">
@@ -132,7 +147,6 @@
 
     <div class="chat-scroll-area" id="chatBox">
         <div class="chat-content" id="chatContent">
-            <!-- 开场白 -->
             <div class="message-row ai">
                 <div class="avatar ai"><i class="bi bi-robot"></i></div>
                 <div class="message-container">
@@ -153,6 +167,12 @@
     </div>
 
     <div class="input-wrapper">
+        <div id="stopBtnContainer" style="position: absolute; top: -40px; width: 100%; display: flex; justify-content: center; pointer-events: none;">
+            <button id="stopBtn" class="stop-btn" onclick="stopGeneration()">
+                <i class="bi bi-stop-circle-fill"></i> 停止生成
+            </button>
+        </div>
+
         <div class="chat-input-panel">
             <div id="filePreviewArea" class="file-chips-area"></div>
             <div class="input-area">
@@ -174,26 +194,54 @@
     </div>
 
     <script>
+        const renderer = new marked.Renderer();
+        renderer.code = function(code, language) {
+            const lang = language || 'Text';
+            let codeText = code;
+            if (typeof code === 'object' && code !== null) {
+                codeText = code.text || code.raw || '';
+            }
+            codeText = String(codeText || '');
+            
+            let highlightedCode;
+            try {
+                highlightedCode = hljs.highlight(codeText, { language: lang }).value;
+            } catch (e) {
+                highlightedCode = codeText;
+            }
+
+            return `
+            <div class="code-block-wrapper">
+                <div class="code-header">
+                    <span>${lang}</span>
+                    <button class="copy-btn" onclick="copyCode(this)">
+                        <i class="bi bi-clipboard"></i> 复制
+                    </button>
+                </div>
+                <pre><code class="hljs language-${lang}">${highlightedCode}</code></pre>
+                <textarea style="display:none;">${codeText}</textarea>
+            </div>`;
+        };
+        marked.use({ renderer });
+
         const chatContent = document.getElementById('chatContent');
         const chatScrollArea = document.getElementById('chatBox');
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
-        const uploadBtn = document.getElementById('uploadBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const filePreviewArea = document.getElementById('filePreviewArea');
         const dropOverlay = document.getElementById('dropOverlay');
 
         let chatHistory = []; 
         let uploadedFiles = []; 
         let isProcessing = false; 
+        let abortController = null;
 
         function autoResize(textarea) {
             textarea.style.height = 'auto';
             textarea.style.height = textarea.scrollHeight + 'px';
-            if (textarea.scrollHeight > 200) {
-                textarea.style.overflowY = "auto";
-            } else {
-                textarea.style.overflowY = "hidden";
-            }
+            if (textarea.scrollHeight > 200) textarea.style.overflowY = "auto";
+            else textarea.style.overflowY = "hidden";
         }
         window.onload = () => autoResize(userInput);
 
@@ -213,12 +261,43 @@
         function toggleLoadingState(isLoading) {
             isProcessing = isLoading;
             userInput.disabled = isLoading;
-            uploadBtn.disabled = isLoading;
             if (isLoading) {
                 sendBtn.disabled = true; sendBtn.classList.remove('active'); userInput.style.cursor = 'wait';
+                stopBtn.classList.add('show');
             } else {
                 sendBtn.disabled = false; userInput.style.cursor = 'text'; userInput.focus(); checkInput();
+                stopBtn.classList.remove('show');
             }
+        }
+
+        function stopGeneration() {
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+                toggleLoadingState(false);
+                const lastBubble = chatContent.lastElementChild.querySelector('.bubble');
+                if (lastBubble) lastBubble.innerHTML += ' <span style="color:#dc2626; font-size:12px;">(已停止)</span>';
+            }
+        }
+
+        function copyCode(btn) {
+            const wrapper = btn.closest('.code-block-wrapper');
+            const code = wrapper.querySelector('textarea').value;
+            navigator.clipboard.writeText(code).then(() => {
+                const originalHtml = btn.innerHTML;
+                btn.innerHTML = '<i class="bi bi-check2"></i> 已复制';
+                setTimeout(() => btn.innerHTML = originalHtml, 2000);
+            });
+        }
+
+        function openLightbox(src) {
+            const lightbox = document.getElementById('lightbox');
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            lightbox.style.display = 'flex';
+        }
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
         }
 
         window.addEventListener('dragenter', (e) => { if(!isProcessing) { e.preventDefault(); dropOverlay.style.display = 'flex'; } });
@@ -284,10 +363,24 @@
 
             toggleLoadingState(true);
             const startTime = Date.now();
-
-            // 1. 创建 AI 消息容器 (初始显示 Loading)
+            
             const aiMessageDiv = appendMessage('ai', '<span class="spinner-border spinner-border-sm text-primary" role="status"></span><span style="margin-left:8px; color:#666;">思考中...</span>', null, null, true);
             const aiContentDiv = aiMessageDiv; 
+            
+            // 🔥 启动计时器
+            const footerDiv = aiMessageDiv.closest('.message-row').querySelector('.message-footer');
+            const timerSpan = document.createElement('span');
+            timerSpan.className = 'generation-timer';
+            timerSpan.innerHTML = '<i class="bi bi-stopwatch"></i> 0.0s';
+            if (footerDiv.firstChild) footerDiv.insertBefore(timerSpan, footerDiv.firstChild);
+            else footerDiv.appendChild(timerSpan);
+
+            const timerInterval = setInterval(() => {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                timerSpan.innerHTML = `<i class="bi bi-stopwatch"></i> ${elapsed}s`;
+            }, 100);
+
+            abortController = new AbortController();
 
             const payload = { 
                 message: text, 
@@ -303,21 +396,19 @@
                 const res = await fetch('/api/chat', { 
                     method: 'POST', 
                     headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify(payload) 
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal
                 });
 
                 if (!res.ok) throw new Error(await res.text());
 
-                // 🌟 核心修改：判断响应类型
                 const contentType = res.headers.get("content-type");
 
-                // === 分支 A: 收到的是 JSON (工具/工作流卡片) ===
                 if (contentType && contentType.includes("application/json")) {
                     const data = await res.json();
-                    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-                    
-                    // 移除刚才创建的临时气泡
+                    clearInterval(timerInterval);
                     aiMessageDiv.closest('.message-row').remove();
+                    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
                     if (data.type === 'workflow_config') {
                         appendMessage('ai', data.reply, data.thought, duration);
@@ -349,7 +440,6 @@
                         appendMessage('ai', html, data.thought, duration);
                     } 
                     else {
-                        // 兜底 JSON 处理
                         let content = data.reply;
                         let codeBlock = "";
                         if (content.includes("### 🤖 策略代码")) {
@@ -380,14 +470,10 @@
                     return;
                 }
 
-                // === 分支 B: 收到的是流 (打字机效果) ===
-                aiContentDiv.innerHTML = ''; // 清空 "Thinking..."
-                
+                aiContentDiv.innerHTML = ''; 
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
                 let fullText = "";
-                
-                // 🧠 思考过程相关的变量
                 let thoughtBuffer = "";
                 let isThinking = false;
                 let hasThoughtBlock = false;
@@ -400,12 +486,9 @@
                     const chunk = decoder.decode(value, { stream: true });
                     fullText += chunk; 
 
-                    // --- 🧠 实时解析 <think> 标签 ---
-                    // 1. 检测思考开始
                     if (chunk.includes('<think>')) {
                         isThinking = true;
                         hasThoughtBlock = true;
-                        // 创建折叠组件结构 (如果还没创建)
                         if (!aiContentDiv.querySelector('.thought-process')) {
                             aiContentDiv.innerHTML = `
                                 <div class="thought-process">
@@ -419,179 +502,135 @@
                         }
                     }
 
-                    // 2. 检测思考结束
                     if (chunk.includes('</think>')) {
                         isThinking = false;
-                        // 把 </think> 之前的内容追加到思考区，之后的追加到回答区
                         const parts = chunk.split('</think>');
-                        thoughtBuffer += parts[0].replace('<think>', ''); // 清理标签
-                        
-                        // 更新思考区 UI
+                        thoughtBuffer += parts[0].replace('<think>', '');
                         const thoughtDiv = aiContentDiv.querySelector('.thought-content');
                         if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer;
 
-                        // 处理剩余的回答部分
                         if (parts[1]) {
                             finalAnswer += parts[1];
                             const answerDiv = aiContentDiv.querySelector('.final-answer');
                             if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
                         }
-                        continue; // 跳过本次循环的剩余逻辑
+                        continue; 
                     }
 
-                    // 3. 正在思考中...
                     if (isThinking) {
                         thoughtBuffer += chunk.replace('<think>', '');
                         const thoughtDiv = aiContentDiv.querySelector('.thought-content');
-                        // 实时显示思考内容
                         if(thoughtDiv) thoughtDiv.innerText = thoughtBuffer; 
-                    } 
-                    // 4. 正在输出正式回答...
-                    else {
-                        // 如果从来没出现过 <think>，直接渲染到根节点
+                    } else {
                         if (!hasThoughtBlock) {
                             finalAnswer += chunk;
                             aiContentDiv.innerHTML = marked.parse(finalAnswer);
                         } else {
-                            // 如果有思考块，渲染到 .final-answer 容器
                             finalAnswer += chunk;
                             const answerDiv = aiContentDiv.querySelector('.final-answer');
                             if(answerDiv) answerDiv.innerHTML = marked.parse(finalAnswer);
                         }
                     }
                     
+                    const imgs = aiContentDiv.querySelectorAll('img');
+                    imgs.forEach(img => {
+                        img.style.cursor = 'zoom-in';
+                        img.onclick = () => openLightbox(img.src);
+                    });
+
                     scrollToBottom();
                 }
-                
-                // 记录历史
                 chatHistory.push({ user: text, ai: fullText });
 
             } catch (error) {
-                aiContentDiv.innerHTML = `<span style="color:red">请求失败: ${error.message}</span>`;
+                if (error.name !== 'AbortError') {
+                    aiContentDiv.innerHTML = `<span style="color:red">请求失败: ${error.message}</span>`;
+                }
             } finally { 
+                clearInterval(timerInterval);
                 toggleLoadingState(false); 
+                abortController = null;
             }
         }
 
-        function renderAnalysisReport(data) {
-            const reportId = `report-${Date.now()}`;
-            const reportData = data.report_data;
-            const diagnosis = data.diagnosis;
+        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
             
-            let html = `
-            <div class="analysis-report" id="${reportId}">
-                <div class="report-header">
-                    <span class="report-title"><i class="bi bi-file-earmark-medical"></i> 单细胞分析报告</span>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="window.print()">
-                        <i class="bi bi-printer"></i> 打印/保存PDF
-                    </button>
-                </div>
-                
-                <div class="report-section">
-                    <h6>1. 执行流程详情</h6>
-                    <div class="accordion" id="acc-${reportId}">`;
-            
-            reportData.steps_details.forEach((step, index) => {
-                const stepId = `step-${reportId}-${index}`;
-                const statusIcon = step.status === 'success' ? '✅' : '❌';
-                const plotHtml = step.plot ? `<div class="mt-2"><img src="${step.plot}" style="max-width:100%; border-radius:4px;"></div>` : '';
-                
-                html += `
-                <div class="accordion-item">
-                    <h2 class="accordion-header">
-                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">
-                            ${statusIcon} ${step.name} <span class="ms-auto text-muted small">${step.summary}</span>
-                        </button>
-                    </h2>
-                    <div id="${stepId}" class="accordion-collapse collapse" data-bs-parent="#acc-${reportId}">
-                        <div class="accordion-body">
-                            <div class="small text-secondary mb-2">${step.details}</div>
-                            ${plotHtml}
-                        </div>
+            let footerHtml = '';
+            if (role === 'ai') {
+                footerHtml = `
+                <div class="message-footer">
+                    ${duration ? `<span class="generation-timer"><i class="bi bi-stopwatch"></i> ${duration}s</span>` : ''}
+                    <div style="display:flex; gap:10px;">
+                        <i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)" title="复制回答"></i>
                     </div>
                 </div>`;
-            });
+            }
             
-            html += `
-                    </div>
-                </div>
-                
-                <div class="report-section">
-                    <h6>2. AI 专家诊断与建议</h6>
-                    <div class="llm-diagnosis">
-                        ${marked.parse(diagnosis)}
-                    </div>
-                </div>
-                
-                <div class="report-section">
-                    <h6>3. 最终可视化结果</h6>
-                    ${reportData.final_plot ? `<img src="${reportData.final_plot}" style="width:100%; border-radius:8px;">` : '无图表生成'}
-                </div>
-            </div>`;
+            let userActionsHtml = '';
+            if (role === 'user') {
+                userActionsHtml = `
+                <div class="user-actions">
+                    <div class="action-item" onclick="editMessage(this)"><i class="bi bi-pencil"></i> 编辑</div>
+                    <div class="action-item" onclick="copyText(this)"><i class="bi bi-copy"></i> 复制</div>
+                </div>`;
+            }
+
+            const bubbleContent = isHtml ? content : marked.parse(content);
+            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container"><div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
+            chatContent.appendChild(row);
+            scrollToBottom();
+            return row.querySelector('.bubble');
+        }
+
+        function renderAnalysisReport(data) {
+            if (!data || !data.report_data) { throw new Error("报告数据为空 (report_data is null)"); }
+            const reportId = `report-${Date.now()}`;
+            const reportData = data.report_data;
+            const diagnosis = data.diagnosis || "暂无诊断信息";
+            const stepsDetails = reportData.steps_details || [];
             
+            let html = `<div class="analysis-report" id="${reportId}"><div class="report-header"><span class="report-title"><i class="bi bi-file-earmark-medical"></i> 单细胞分析报告</span><button class="btn btn-outline-secondary btn-sm" onclick="window.print()"><i class="bi bi-printer"></i> 打印/保存PDF</button></div><div class="report-section"><h6>1. 执行流程详情</h6><div class="accordion" id="acc-${reportId}">`;
+            
+            if (stepsDetails.length === 0) { html += `<div class="text-muted p-2">无详细步骤日志</div>`; } 
+            else {
+                stepsDetails.forEach((step, index) => {
+                    const stepId = `step-${reportId}-${index}`;
+                    const statusIcon = step.status === 'success' ? '✅' : '❌';
+                    const plotHtml = step.plot ? `<div class="mt-2"><img src="${step.plot}" style="max-width:100%; border-radius:4px; border:1px solid #eee; cursor:zoom-in;" onclick="openLightbox(this.src)"></div>` : '';
+                    const detailsHtml = step.details ? `<div class="small text-secondary mb-2 overflow-auto">${step.details}</div>` : '';
+                    html += `<div class="accordion-item"><h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">${statusIcon} ${step.name || 'Step'} <span class="ms-auto text-muted small">${step.summary || ''}</span></button></h2><div id="${stepId}" class="accordion-collapse collapse" data-bs-parent="#acc-${reportId}"><div class="accordion-body">${detailsHtml}${plotHtml}</div></div></div>`;
+                });
+            }
+            html += `</div></div><div class="report-section"><h6>2. AI 专家诊断与建议</h6><div class="llm-diagnosis">${marked.parse(diagnosis)}</div></div><div class="report-section"><h6>3. 最终可视化结果</h6>${reportData.final_plot ? `<img src="${reportData.final_plot}" style="width:100%; border-radius:8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); cursor:zoom-in;" onclick="openLightbox(this.src)">` : '<div class="alert alert-warning">⚠️ 未生成最终 UMAP 图 (final_plot 字段为空)</div>'}</div></div>`;
             appendMessage('ai', html, null, null, true);
         }
 
         function renderDataSelector(datasets) {
             const selectorId = `ds-${Date.now()}`;
-            let html = `
-            <div class="data-selector-container" id="${selectorId}">
-                <div class="data-selector-header">
-                    <i class="bi bi-folder2-open"></i> 选择 Galaxy 历史数据
-                </div>
-                <div class="data-selector-list">`;
-            
-            datasets.forEach(d => {
-                html += `
-                <div class="dataset-item" onclick="toggleCheckbox(this)">
-                    <input type="checkbox" class="form-check-input" value="${d.id}" data-name="${d.name}" onclick="event.stopPropagation(); toggleCheckbox(this.parentElement, true)">
-                    <div class="dataset-info">
-                        <span class="dataset-name">${d.hid}: ${d.name}</span>
-                        <span class="dataset-meta">${d.ext} | ${d.size}</span>
-                    </div>
-                </div>`;
-            });
-            
-            html += `
-                </div>
-                <div class="data-selector-footer">
-                    <button class="btn btn-primary btn-sm" onclick="submitDataSelection('${selectorId}')">
-                        确认使用 <i class="bi bi-check2"></i>
-                    </button>
-                </div>
-            </div>`;
-            
+            let html = `<div class="data-selector-container" id="${selectorId}"><div class="data-selector-header"><i class="bi bi-folder2-open"></i> 选择 Galaxy 历史数据</div><div class="data-selector-list">`;
+            datasets.forEach(d => { html += `<div class="dataset-item" onclick="toggleCheckbox(this)"><input type="checkbox" class="form-check-input" value="${d.id}" data-name="${d.name}" onclick="event.stopPropagation(); toggleCheckbox(this.parentElement, true)"><div class="dataset-info"><span class="dataset-name">${d.hid}: ${d.name}</span><span class="dataset-meta">${d.ext} | ${d.size}</span></div></div>`; });
+            html += `</div><div class="data-selector-footer"><button class="btn btn-primary btn-sm" onclick="submitDataSelection('${selectorId}')">确认使用 <i class="bi bi-check2"></i></button></div></div>`;
             appendMessage('ai', html, null, null, true);
         }
 
         function toggleCheckbox(row, fromCheckbox = false) {
             const checkbox = row.querySelector('input[type="checkbox"]');
-            if (!fromCheckbox) {
-                checkbox.checked = !checkbox.checked;
-            }
-            if(checkbox.checked) row.classList.add('selected');
-            else row.classList.remove('selected');
+            if (!fromCheckbox) checkbox.checked = !checkbox.checked;
+            if(checkbox.checked) row.classList.add('selected'); else row.classList.remove('selected');
         }
 
         function submitDataSelection(selectorId) {
             const container = document.getElementById(selectorId);
             const checkboxes = container.querySelectorAll('input:checked');
             if (checkboxes.length === 0) { alert("请至少选择一个文件"); return; }
-            
-            uploadedFiles = []; 
-            let selectedNames = [];
-            checkboxes.forEach(cb => {
-                const name = cb.getAttribute('data-name');
-                uploadedFiles.push({ id: cb.value, name: name });
-                selectedNames.push(name);
-            });
-            
-            const btn = container.querySelector('button');
-            btn.disabled = true; btn.innerText = "已选择";
-            
+            uploadedFiles = []; let selectedNames = [];
+            checkboxes.forEach(cb => { const name = cb.getAttribute('data-name'); uploadedFiles.push({ id: cb.value, name: name }); selectedNames.push(name); });
+            const btn = container.querySelector('button'); btn.disabled = true; btn.innerText = "已选择";
             const userMsg = `我已选择以下文件：\n${selectedNames.join('\n')}\n\n请基于这些文件，继续规划 Seurat 单细胞分析工作流。`;
             appendMessage('user', userMsg);
-            
             sendMessage(null, "已选择文件，请继续规划 Seurat 单细胞工作流", null, null, true);
         }
 
@@ -599,49 +638,31 @@
             const monitorId = `monitor-${runId}`;
             const html = `<div class="workflow-monitor" id="${monitorId}"><h6>🚀 工作流执行进度</h6><div class="steps-container"></div></div>`;
             appendMessage('ai', html, null, null, true);
-            
             const container = document.getElementById(monitorId).querySelector('.steps-container');
-            
             const poll = setInterval(async () => {
                 try {
                     const res = await fetch(`/api/workflow/status/${runId}`);
                     const data = await res.json();
-                    
                     if (data.status === 'not_found') { clearInterval(poll); return; }
-                    
                     let stepsHtml = '';
-                    data.steps_status.forEach((step, index) => {
-                        let iconClass = 'pending';
-                        let iconContent = '<i class="bi bi-circle"></i>';
-                        if (step.status === 'running') { iconClass = 'running'; iconContent = '<i class="bi bi-arrow-repeat"></i>'; }
-                        else if (step.status === 'success') { iconClass = 'success'; iconContent = '<i class="bi bi-check-lg"></i>'; }
-                        else if (step.status === 'failed') { iconClass = 'failed'; iconContent = '<i class="bi bi-x-lg"></i>'; }
-                        
-                        stepsHtml += `<div class="step-item"><div class="step-icon ${iconClass}">${iconContent}</div><div class="step-name">${step.name || 'Step ' + (index + 1)}</div><div class="step-status-text">${step.status}</div></div>`;
-                    });
-                    container.innerHTML = stepsHtml;
-                    
+                    if (data.steps_status && Array.isArray(data.steps_status)) {
+                        data.steps_status.forEach((step, index) => {
+                            let iconClass = 'pending'; let iconContent = '<i class="bi bi-circle"></i>';
+                            if (step.status === 'running') { iconClass = 'running'; iconContent = '<i class="bi bi-arrow-repeat"></i>'; }
+                            else if (step.status === 'success') { iconClass = 'success'; iconContent = '<i class="bi bi-check-lg"></i>'; }
+                            else if (step.status === 'failed') { iconClass = 'failed'; iconContent = '<i class="bi bi-x-lg"></i>'; }
+                            stepsHtml += `<div class="step-item"><div class="step-icon ${iconClass}">${iconContent}</div><div class="step-name">${step.name || 'Step ' + (index + 1)}</div><div class="step-status-text">${step.status}</div></div>`;
+                        });
+                        container.innerHTML = stepsHtml;
+                    }
                     if (data.completed) {
                         clearInterval(poll);
                         if (data.status === 'success') {
                             container.innerHTML += `<div class="alert alert-success mt-3 mb-0">🎉 工作流全部执行完成！正在加载报告...</div>`;
-                            
-                            // 🔥🔥🔥 核心修复：调用报告渲染函数！
-                            // 构造 renderAnalysisReport 需要的数据结构
-                            const reportPayload = {
-                                diagnosis: "✅ **分析成功！**\n\n数据已完成全流程处理，下方展示了最终的 UMAP 降维可视化结果及关键质控指标。您可以点击右上角按钮打印或保存此报告。",
-                                report_data: data.report_data // 这里面包含了 final_plot
-                            };
-                            
-                            // 延迟 500ms 让用户看到完成提示，然后弹出大报告
-                            setTimeout(() => {
-                                renderAnalysisReport(reportPayload);
-                                scrollToBottom();
-                            }, 500);
-                            
-                        } else {
-                            container.innerHTML += `<div class="alert alert-danger mt-3 mb-0">❌ 执行出错: ${data.error}</div>`;
-                        }
+                            // 🔥 核心修复：调用报告渲染函数
+                            const reportPayload = { diagnosis: data.report_data.diagnosis || "✅ **分析成功！**\n\n数据已完成全流程处理，下方展示了最终的 UMAP 降维可视化结果及关键质控指标。", report_data: data.report_data };
+                            setTimeout(() => { renderAnalysisReport(reportPayload); scrollToBottom(); }, 500);
+                        } else { container.innerHTML += `<div class="alert alert-danger mt-3 mb-0">❌ 执行出错: ${data.error}</div>`; }
                     }
                 } catch (e) { console.error(e); }
             }, 2000);
@@ -652,40 +673,22 @@
             let formHtml = `<div class="params-form" id="${formId}"><h5>📋 ${data.workflow_name}</h5><p class="text-muted">请确认或修改每一步的参数：</p><div class="accordion" id="acc-${formId}">`;
             data.steps.forEach((step, index) => {
                 const stepId = `step-${index}`;
-                formHtml += `
-                <div class="accordion-item">
-                    <h2 class="accordion-header d-flex align-items-center">
-                        <div class="form-check ms-3 me-2">
-                            <input class="form-check-input step-checkbox" type="checkbox" checked data-index="${index}">
-                        </div>
-                        <button class="accordion-button ${index > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">
-                            ${step.name}
-                        </button>
-                    </h2>
-                    <div id="${stepId}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#acc-${formId}">
-                        <div class="accordion-body">
-                            <p class="text-muted small">${step.desc}</p>
-                            <input type="hidden" name="tool_id_${index}" value="${step.tool_id}">
-                            <input type="hidden" name="step_name_${index}" value="${step.name}">`;
-                
-                step.params.forEach(p => {
-                    const inputName = `param_${index}_${p.name}`;
-                    formHtml += `<div class="mb-2"><label class="form-label small">${p.label}</label>`;
-                    if (p.type === 'select') {
-                        formHtml += `<select class="form-select form-select-sm" name="${inputName}">`;
-                        p.options.forEach(opt => {
-                            const selected = opt.value === p.value ? 'selected' : '';
-                            formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`;
-                        });
-                        formHtml += `</select>`;
-                    } else if (p.type === 'boolean') {
-                        const checked = p.value === 'true' ? 'checked' : '';
-                        formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${inputName}" ${checked}></div>`;
-                    } else {
-                        formHtml += `<input type="text" class="form-control form-control-sm" name="${inputName}" value="${p.value || ''}">`;
-                    }
-                    formHtml += `</div>`;
-                });
+                formHtml += `<div class="accordion-item"><h2 class="accordion-header d-flex align-items-center"><div class="form-check ms-3 me-2"><input class="form-check-input step-checkbox" type="checkbox" checked data-index="${index}"></div><button class="accordion-button ${index > 0 ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#${stepId}">${step.name}</button></h2><div id="${stepId}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#acc-${formId}"><div class="accordion-body"><p class="text-muted small">${step.desc}</p><input type="hidden" name="tool_id_${index}" value="${step.tool_id}"><input type="hidden" name="step_name_${index}" value="${step.name}">`;
+                if (Array.isArray(step.params)) {
+                    step.params.forEach(p => {
+                        const inputName = `param_${index}_${p.name}`;
+                        formHtml += `<div class="mb-2"><label class="form-label small">${p.label}</label>`;
+                        if (p.type === 'select') {
+                            formHtml += `<select class="form-select form-select-sm" name="${inputName}">`;
+                            p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
+                            formHtml += `</select>`;
+                        } else if (p.type === 'boolean') {
+                            const checked = p.value === 'true' ? 'checked' : '';
+                            formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${inputName}" ${checked}></div>`;
+                        } else { formHtml += `<input type="text" class="form-control form-control-sm" name="${inputName}" value="${p.value || ''}">`; }
+                        formHtml += `</div>`;
+                    });
+                }
                 formHtml += `</div></div></div>`;
             });
             formHtml += `</div><button class="btn btn-success btn-run mt-3" onclick="submitWorkflow('${formId}', ${data.steps.length})">🚀 执行工作流</button></div>`;
@@ -693,11 +696,10 @@
         }
 
         function submitWorkflow(formId, totalSteps) {
+            if (uploadedFiles.length === 0) { alert("⚠️ 请先上传单细胞数据文件 (.h5ad, .mtx 等) 再执行工作流！"); document.getElementById('fileInput').click(); return; }
             const formContainer = document.getElementById(formId);
             const stepsData = [];
-            
             const checkboxes = formContainer.querySelectorAll('.step-checkbox');
-            
             checkboxes.forEach((cb, i) => {
                 if (cb.checked) {
                     const toolId = formContainer.querySelector(`input[name="tool_id_${i}"]`).value;
@@ -712,14 +714,8 @@
                     stepsData.push({ name: stepName, tool_id: toolId, params: params });
                 }
             });
-
-            if (stepsData.length === 0) {
-                alert("请至少选择一个步骤！");
-                return;
-            }
-
-            const btn = formContainer.querySelector('button');
-            btn.disabled = true; btn.innerText = "工作流执行中...";
+            if (stepsData.length === 0) { alert("请至少选择一个步骤！"); return; }
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "工作流执行中...";
             sendMessage(null, "Execute Workflow", null, { steps: stepsData });
         }
 
@@ -730,17 +726,12 @@
                 formHtml += `<div class="mb-3"><label class="form-label">${p.label}</label>`;
                 if (p.type === 'select') {
                     formHtml += `<select class="form-select" name="${p.name}">`;
-                    p.options.forEach(opt => {
-                        const selected = opt.value === p.value ? 'selected' : '';
-                        formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`;
-                    });
+                    p.options.forEach(opt => { const selected = opt.value === p.value ? 'selected' : ''; formHtml += `<option value="${opt.value}" ${selected}>${opt.label}</option>`; });
                     formHtml += `</select>`;
                 } else if (p.type === 'boolean') {
                     const checked = p.value === 'true' ? 'checked' : '';
                     formHtml += `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="${p.name}" ${checked}></div>`;
-                } else {
-                    formHtml += `<input type="text" class="form-control" name="${p.name}" value="${p.value || ''}">`;
-                }
+                } else { formHtml += `<input type="text" class="form-control" name="${p.name}" value="${p.value || ''}">`; }
                 if (p.help) formHtml += `<div class="form-text">${p.help}</div>`;
                 formHtml += `</div>`;
             });
@@ -753,12 +744,8 @@
             const formContainer = document.getElementById(formId);
             const inputs = formContainer.querySelectorAll('input, select');
             const params = {};
-            inputs.forEach(input => {
-                if (input.type === 'checkbox') params[input.name] = input.checked;
-                else params[input.name] = input.value;
-            });
-            const btn = formContainer.querySelector('button');
-            btn.disabled = true; btn.innerText = "已提交...";
+            inputs.forEach(input => { if (input.type === 'checkbox') params[input.name] = input.checked; else params[input.name] = input.value; });
+            const btn = formContainer.querySelector('button'); btn.disabled = true; btn.innerText = "已提交...";
             sendMessage(toolInfo, `Run ${toolInfo.name} with params`, params);
         }
 
@@ -793,70 +780,18 @@
 
         function toggleCode(btn) {
             const container = btn.nextElementSibling;
-            if (container.style.display === 'block') {
-                container.style.display = 'none';
-                btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码';
-            } else {
-                container.style.display = 'block';
-                btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码';
-            }
-        }
-
-        function appendMessage(role, content, thoughtContent = null, duration = null, isHtml = false) {
-            const row = document.createElement('div');
-            row.className = `message-row ${role}`;
-            let avatarHtml = role === 'ai' ? `<div class="avatar ai"><i class="bi bi-robot"></i></div>` : '';
-            let thoughtHtml = '';
-            if (role === 'ai' && thoughtContent) {
-                thoughtHtml = `<div class="thought-block"><div class="thought-header" onclick="toggleThought(this)"><div class="thought-title"><i class="bi bi-stars thought-icon"></i> 深度思考</div><i class="bi bi-chevron-down thought-arrow"></i></div><div class="thought-content">${marked.parse(thoughtContent)}</div></div>`;
-            }
-            let footerHtml = '';
-            if (role === 'ai' && duration) {
-                footerHtml = `<div style="margin-top:5px; font-size:12px; color:#999; display:flex; gap:10px;"><span>${duration}s</span><i class="bi bi-copy" style="cursor:pointer" onclick="copyText(this)"></i></div>`;
-            }
-            let userActionsHtml = '';
-            if (role === 'user') {
-                userActionsHtml = `
-                <div class="user-actions">
-                    <div class="action-item" onclick="editMessage(this)">
-                        <i class="bi bi-pencil"></i> 编辑
-                    </div>
-                    <div class="action-item" onclick="copyText(this)">
-                        <i class="bi bi-copy"></i> 复制
-                    </div>
-                </div>`;
-            }
-            const bubbleContent = isHtml ? content : marked.parse(content);
-            row.innerHTML = `${role === 'ai' ? avatarHtml : ''}<div class="message-container">${thoughtHtml}<div class="bubble">${bubbleContent}</div>${userActionsHtml}${footerHtml}</div>`;
-            chatContent.appendChild(row);
-            scrollToBottom();
-            return row.querySelector('.bubble');
-        }
-
-        function renderSuggestions(parentElement, suggestions) {
-            if (!suggestions || suggestions.length === 0) return;
-            const chipContainer = document.createElement('div');
-            chipContainer.className = 'suggestion-chips';
-            suggestions.forEach(text => {
-                const chip = document.createElement('div');
-                chip.className = 'chip-btn';
-                chip.innerText = text;
-                chip.onclick = () => { userInput.value = text; sendMessage(); };
-                chipContainer.appendChild(chip);
-            });
-            parentElement.parentElement.appendChild(chipContainer);
-            scrollToBottom();
+            if (container.style.display === 'block') { container.style.display = 'none'; btn.innerHTML = '<i class="bi bi-code-slash"></i> 查看策略代码'; }
+            else { container.style.display = 'block'; btn.innerHTML = '<i class="bi bi-chevron-up"></i> 收起代码'; }
         }
 
         function toggleThought(header) {
             const content = header.nextElementSibling;
-            const icon = header.querySelector('.bi-chevron-down');
-            if (content.style.display === 'block') {
-                content.style.display = 'none';
-                icon.style.transform = 'rotate(0deg)';
+            if (content.classList.contains('open')) {
+                content.classList.remove('open');
+                header.querySelector('i').className = 'bi bi-stars';
             } else {
-                content.style.display = 'block';
-                icon.style.transform = 'rotate(180deg)';
+                content.classList.add('open');
+                header.querySelector('i').className = 'bi bi-chevron-down';
             }
         }
 
@@ -869,11 +804,7 @@
             if (navigator.clipboard && window.isSecureContext) {
                 navigator.clipboard.writeText(text).then(() => {
                     const icon = btn.querySelector('i');
-                    if(icon) {
-                        const originalClass = icon.className;
-                        icon.className = 'bi bi-check';
-                        setTimeout(() => icon.className = originalClass, 2000);
-                    }
+                    if(icon) { const originalClass = icon.className; icon.className = 'bi bi-check'; setTimeout(() => icon.className = originalClass, 2000); }
                 });
             } else {
                 const textArea = document.createElement("textarea");
@@ -888,10 +819,7 @@
         function editMessage(btn) {
             const container = btn.closest('.message-container');
             const text = container.querySelector('.bubble').innerText;
-            userInput.value = text;
-            userInput.focus();
-            autoResize(userInput);
-            checkInput();
+            userInput.value = text; userInput.focus(); autoResize(userInput); checkInput();
         }
 
         function selectTool(tool, query) { appendMessage('user', `我选择运行: <b>${tool.name}</b>`); sendMessage(tool, query); }
